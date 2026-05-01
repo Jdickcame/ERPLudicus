@@ -1,0 +1,19 @@
+# --- GENERAL ---
+.DS_Store
+.env
+.vscode/
+.idea/
+
+# --- PYTHON / DJANGO (Backend) ---
+backend/venv/
+backend/env/
+backend/__pycache__/
+*.pyc
+db.sqlite3
+media/
+
+# --- NODE / REACT (Frontend) ---
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env.local
