@@ -1,3 +1,4 @@
+from django.contrib.auth import get_user_model
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -13,6 +14,8 @@ from .serializers import (
     CashRegisterSerializer,
     CashShiftSerializer,
 )
+
+User = get_user_model()
 
 
 class CashRegisterViewSet(viewsets.ModelViewSet):
@@ -104,11 +107,38 @@ class CashMovementViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        # Validar que el usuario tenga caja abierta
-        shift = CashShift.objects.filter(user=self.request.user, status="OPEN").first()
+        user = self.request.user
+
+        # 1. Validar que el usuario tenga caja abierta
+        shift = CashShift.objects.filter(user=user, status="OPEN").first()
         if not shift:
             raise serializers.ValidationError(
-                "No tienes una caja abierta. Abre caja primero."
+                {"error": "No tienes una caja abierta. Abre caja primero."}
             )
 
-        serializer.save(user=self.request.user, shift=shift)
+        # 🛑 2. EL GUARDIÁN: Validar permisos de movimiento manual
+        # Si el usuario NO es un ADMIN o MANAGER, le exigimos el PIN
+        if user.role not in ["ADMIN", "MANAGER"]:
+            supervisor_pin = self.request.data.get("supervisor_pin")
+
+            if not supervisor_pin:
+                raise serializers.ValidationError(
+                    {
+                        "error": "No tienes permisos. Se requiere PIN de un Gerente/Admin."
+                    }
+                )
+
+            # Buscamos un usuario con ese PIN que SÍ sea gerente o admin
+            supervisor = User.objects.filter(
+                pin=supervisor_pin, role__in=["ADMIN", "MANAGER"]
+            ).first()
+
+            if not supervisor:
+                raise serializers.ValidationError(
+                    {
+                        "error": "PIN inválido o el usuario no tiene permisos de gerencia."
+                    }
+                )
+
+        # ✅ 3. Guardar el movimiento (Se ejecuta solo si pasó el Guardián o si ya era Jefe)
+        serializer.save(user=user, shift=shift)

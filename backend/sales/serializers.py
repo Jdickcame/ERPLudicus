@@ -1,7 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Customer, Sale, SaleDetail, SalePayment
+from .models import CreditNote, Customer, Sale, SaleDetail, SalePayment
 
 
 # --- Serializador de Cliente ---
@@ -39,6 +39,20 @@ class SalePaymentSerializer(serializers.ModelSerializer):
         fields = ["payment_method", "amount", "reference"]
 
 
+class CreditNoteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CreditNote
+        fields = "__all__"
+        read_only_fields = [
+            "series",
+            "number",
+            "date",
+            "json_sent",
+            "json_response",
+            "sunat_pdf_url",
+        ]
+
+
 # --- Serializador de Venta ---
 class SaleSerializer(serializers.ModelSerializer):
     details = SaleDetailSerializer(many=True)
@@ -48,6 +62,8 @@ class SaleSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source="customer.name", read_only=True)
     user_name = serializers.CharField(source="user.username", read_only=True)
 
+    client_doc = serializers.CharField(source="customer.tax_id", read_only=True)
+
     # Inputs (Write Only)
     # Lo dejamos opcional para que views.py lo inyecte si falta
     branch_id = serializers.IntegerField(write_only=True, required=False)
@@ -55,6 +71,7 @@ class SaleSerializer(serializers.ModelSerializer):
     customer = serializers.PrimaryKeyRelatedField(
         queryset=Customer.objects.all(), required=False, allow_null=True
     )
+    credit_notes = CreditNoteSerializer(many=True, read_only=True)
 
     class Meta:
         model = Sale
@@ -66,6 +83,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "user_name",
             "customer",
             "client_name",
+            "client_doc",
             "date",
             "series",
             "number",  # Estos vendrán calculados desde views.py
@@ -78,6 +96,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "sunat_cdr_url",
             "details",
             "payments",
+            "credit_notes",
         ]
         read_only_fields = ["user", "branch", "date"]
         # NOTA: Quitamos 'series' y 'number' de read_only_fields para poder escribirlos desde el ViewSet

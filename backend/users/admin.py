@@ -22,7 +22,12 @@ class CustomUserAdmin(UserAdmin):
         (
             "Información Personalizada (ERP)",
             {
-                "fields": ("role", "branch"),
+                "fields": (
+                    "role",
+                    "branch",
+                    "pin",
+                    "can_authorize_voids",
+                ),
             },
         ),
     )

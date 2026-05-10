@@ -134,3 +134,42 @@ class SaleDetail(models.Model):
 
     def __str__(self):
         return f"{self.quantity} x {self.product.name}"
+
+
+class CreditNote(models.Model):
+    # Tipos de Nota según SUNAT
+    TYPE_CHOICES = [
+        ("07", "NOTA DE CRÉDITO"),
+        ("08", "NOTA DE DÉBITO"),
+    ]
+
+    # Motivos comunes de Nota de Crédito (Catálogo 09 SUNAT)
+    MOTIVOS = [
+        ("01", "ANULACION DE LA OPERACION"),
+        ("07", "DEVOLUCION POR ITEM"),
+        ("13", "CORRECCION POR ERROR EN LA DESCRIPCION"),
+    ]
+
+    sale = models.ForeignKey(
+        Sale, on_delete=models.PROTECT, related_name="credit_notes"
+    )
+
+    # Serie: FC01 (para Facturas) o BC01 (para Boletas)
+    series = models.CharField(max_length=4)
+    number = models.CharField(max_length=8)
+
+    note_type = models.CharField(
+        max_length=2, choices=TYPE_CHOICES, default="07"
+    )  # 07=Crédito
+    reason_code = models.CharField(max_length=2, choices=MOTIVOS, default="01")
+    description = models.CharField(max_length=255, default="ANULACION DE LA OPERACION")
+
+    date = models.DateTimeField(auto_now_add=True)
+
+    # Auditoría API
+    json_sent = models.JSONField(null=True, blank=True)
+    json_response = models.JSONField(null=True, blank=True)
+    sunat_pdf_url = models.URLField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.series}-{self.number}"

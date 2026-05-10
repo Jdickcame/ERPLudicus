@@ -214,3 +214,105 @@ class InvoiceService:
         except Exception as e:
             print(f"❌ Error de Conexión: {e}")
             return {"success": False, "error": str(e)}
+
+    def enviar_nota(self, note):
+        sale = note.sale
+
+        # Mapeo de campos según tu JSON de ejemplo
+        data = {
+            "ublVersion": "2.1",
+            "tipoDoc": note.note_type,  # 07 (Crédito) o 08 (Débito)
+            "serie": note.series,
+            "correlativo": note.number,
+            "fechaEmision": note.date.strftime("%Y-%m-%dT%H:%M:%S-05:00"),
+            # Datos de referencia (A quién anula)
+            "tipDocAfectado": sale.invoice_type_code,  # 01 (Factura) o 03 (Boleta)
+            "numDocfectado": f"{sale.series}-{sale.number}",  # Según tu JSON es "numDocfectado" (sic)
+            "codMotivo": note.reason_code,
+            "desMotivo": note.description,
+            "tipoMoneda": "PEN",
+            # Cliente (Igual que la venta original)
+            "client": {
+                "tipoDoc": sale.customer.document_type
+                if sale.customer
+                else "0",  # 0 = Sin Doc (Varios)
+                "numDoc": sale.customer.tax_id if sale.customer else "00000000",
+                "rznSocial": sale.customer.name if sale.customer else "PUBLICO GENERAL",
+                "address": {
+                    "direccion": sale.customer.address if sale.customer else "-"
+                },
+            },
+            # Empresa (ApisPeru suele jalar esto del token, pero lo mandamos por si acaso)
+            "company": {
+                "ruc": "20491934671",
+                "razonSocial": "AGA CORP S.A.C.",
+                "address": {"direccion": "Cal. Siqueiros Nro 110 - Surquillo"},
+            },
+            # Montos (Si es anulación total, copiamos los de la venta)
+            "mtoOperGravadas": float(sale.total_gravada),
+            "mtoIGV": float(sale.total_igv),
+            "totalImpuestos": float(sale.total_igv),
+            "mtoImpVenta": float(sale.total),
+            "details": [],
+            "legends": [
+                {
+                    "code": "1000",
+                    "value": f"SON: {self._number_to_words(sale.total)}",  # Usamos un helper o texto fijo
+                }
+            ],
+        }
+
+        # Detalles
+        for detail in sale.details.all():
+            # Cálculos unitarios inversos
+            precio_unitario = float(detail.subtotal) / float(
+                detail.quantity
+            )  # Incluye IGV
+            valor_unitario = precio_unitario / 1.18  # Sin IGV
+            igv_item = float(detail.subtotal) - (float(detail.subtotal) / 1.18)
+
+            data["details"].append(
+                {
+                    "codProducto": detail.product.sku or "GEN",
+                    "unidad": "NIU",
+                    "cantidad": float(detail.quantity),
+                    "descripcion": detail.product.name,
+                    "mtoBaseIgv": float(detail.subtotal) / 1.18,
+                    "porcentajeIgv": 18,
+                    "igv": igv_item,
+                    "tipAfeIgv": "10",  # Gravado - Operación Onerosa
+                    "totalImpuestos": igv_item,
+                    "mtoValorVenta": float(detail.subtotal) / 1.18,
+                    "mtoValorUnitario": valor_unitario,
+                    "mtoPrecioUnitario": precio_unitario,
+                }
+            )
+
+        # Envío al endpoint correcto
+        url = f"{self.base_url}/note/send"
+        note.json_sent = data
+
+        try:
+            r = requests.post(url, headers=self.headers, json=data, timeout=10)
+            note.json_response = r.json()
+
+            if r.status_code == 200:
+                # Guardamos PDF si viene
+                note.sunat_pdf_url = r.json().get("links", {}).get("pdf")
+                note.save()
+                print("✅ Nota enviada correctamente")
+            else:
+                print(f"❌ Error API: {r.text}")
+
+            return r.json()
+        except Exception as e:
+            print(f"❌ Error conexión: {e}")
+            return None
+
+    def _number_to_words(self, amount):
+        from num2words import num2words
+
+        try:
+            return num2words(amount, lang="es").upper() + " SOLES"
+        except:  # noqa: E722
+            return f"{amount} SOLES"

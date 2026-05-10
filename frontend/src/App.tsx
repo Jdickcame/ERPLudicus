@@ -17,11 +17,15 @@ import PurchaseList from "./pages/purchases/PurchaseList";
 import Suppliers from "./pages/purchases/Suppliers";
 
 // Ventas
-import NewSale from "./pages/sales/NewSale";
+import PointOfSale from "./pages/pos/PointOfSale";
+import PosHistory from "./pages/pos/PosHistory";
+import PosReports from "./pages/pos/PosReports";
 import SaleList from "./pages/sales/SaleList";
 
 // Caja
 import CashPage from "./pages/cash/CashPage";
+
+import PosLogin from "./pages/auth/PosLogin";
 
 // Usuarios
 import type { JSX } from "react";
@@ -55,6 +59,8 @@ function App() {
             {/* Ruta Pública */}
             <Route path="/login" element={<Login />} />
 
+            <Route path="/pos-login" element={<PosLogin />} />
+
             {/* RUTAS PROTEGIDAS (Requieren Login + Layout) */}
             <Route
               element={
@@ -74,12 +80,15 @@ function App() {
               {/* 🟠 ZONA VENTAS (Solo permiso 'sales' o Admin) */}
               <Route element={<PermissionRoute module="sales" />}>
                 <Route path="/sales" element={<SaleList />} />
-                <Route path="/pos" element={<NewSale />} />
+                <Route path="/pos" element={<PointOfSale />} />
+                <Route path="/pos/history" element={<PosHistory />} />
+                <Route path="/pos/reports" element={<PosReports />} />
               </Route>
 
               {/* 🟢 ZONA DE CAJA */}
               <Route element={<PermissionRoute module="cash" />}>
                 <Route path="/cash" element={<CashPage />} />
+                <Route path="/pos/cash" element={<CashPage />} />
               </Route>
 
               {/* 🔵 ZONA COMPRAS (Solo permiso 'purchases' o Admin) */}

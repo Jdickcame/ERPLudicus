@@ -21,6 +21,17 @@ class User(AbstractUser):
         related_name="users",
     )
 
+    pin = models.CharField(
+        max_length=6,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="PIN de 4 a 6 dígitos para ingreso y autorizaciones en el POS",
+    )
+    can_authorize_voids = models.BooleanField(
+        default=False, verbose_name="Ventas: Autorizar Anulaciones"
+    )
+
     # 1. USUARIOS
     can_view_users = models.BooleanField(
         default=False, verbose_name="Usuarios: Gestión"
