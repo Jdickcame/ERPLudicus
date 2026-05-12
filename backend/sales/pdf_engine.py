@@ -1,5 +1,3 @@
-# backend/sales/pdf_engine.py
-
 from num2words import num2words
 from reportlab.graphics import renderPDF
 from reportlab.graphics.barcode import qr
@@ -264,6 +262,113 @@ class TicketEngine:
         c.drawCentredString(self.x_cen, y, "¡¡GRACIAS POR SU COMPRA!!")
         y -= self.row_h * 1.5
 
+        self.drawDottedLine(c, y)
+
+        c.showPage()
+        c.save()
+
+    def generate_hourly_report(self, opened_at, hourly_data):
+        sorted_hours = sorted(hourly_data.items())
+
+        # 1. Aumentamos la altura base para que no quede como un cuadrito minúsculo
+        base_h = 90 * mm
+        filas_h = len(sorted_hours) * (self.row_h * 1.8)  # Más espacio entre filas
+        alto_total = base_h + filas_h
+
+        c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
+        # 2. Empezamos a dibujar más abajo (12mm de margen superior en lugar de 6)
+        y = alto_total - (12 * mm)
+
+        # --- CABECERA DEL REPORTE ---
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(self.x_cen, y, "REPORTE POR HORA")
+        y -= self.row_h * 1.5
+        c.setFont("Helvetica", 8)
+        c.drawCentredString(
+            self.x_cen, y, f"Apertura: {opened_at.strftime('%d/%m/%Y %H:%M')}"
+        )
+        y -= self.row_h * 2
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- TÍTULOS DE COLUMNAS ---
+        c.setFont("Helvetica-Bold", 7)
+        c.drawString(self.x_izq, y, "HORA")
+        c.drawRightString(self.x_cen + (4 * mm), y, "CANT")
+        c.drawRightString(self.x_der - (15 * mm), y, "NETO")
+        c.drawRightString(self.x_der, y, "BRUTO")
+        y -= self.row_h * 1
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- FILAS ---
+        c.setFont("Helvetica", 7)
+        total_tickets = 0
+        total_bruto = 0.0
+        for time_label, data in sorted_hours:
+            c.drawString(self.x_izq, y, time_label)
+            c.drawRightString(self.x_cen + (4 * mm), y, str(data["count"]))
+            c.drawRightString(self.x_der - (15 * mm), y, f"{data['net']:.2f}")
+            c.drawRightString(self.x_der, y, f"{data['gross']:.2f}")
+
+            total_tickets += data["count"]
+            total_bruto += data["gross"]
+            y -= self.row_h * 1.5
+
+        y -= self.row_h * 0.2
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- TOTALES FINALES ---
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(self.x_izq, y, "TOTALES:")
+        c.drawRightString(self.x_cen + (4 * mm), y, str(total_tickets))
+        c.drawRightString(self.x_der, y, f"S/ {total_bruto:.2f}")
+
+        c.showPage()
+        c.save()
+
+    def generate_pmix_report(self, pmix_data):
+        sorted_pmix = sorted(pmix_data.items(), key=lambda item: item[1], reverse=True)
+
+        base_h = 80 * mm
+        filas_h = len(sorted_pmix) * (self.row_h * 1.8)
+        alto_total = base_h + filas_h
+
+        c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
+        y = alto_total - (12 * mm)  # Margen superior más amplio
+
+        # --- CABECERA ---
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(self.x_cen, y, "PRODUCT MIX (PMIX)")
+        y -= self.row_h * 1.5
+        c.setFont("Helvetica", 8)
+        c.drawCentredString(self.x_cen, y, "Ranking de ventas del turno")
+        y -= self.row_h * 2
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- TÍTULOS DE COLUMNAS ---
+        c.setFont("Helvetica-Bold", 7)
+        c.drawString(self.x_izq, y, "PRODUCTO")
+        c.drawRightString(self.x_der, y, "CANTIDAD")
+        y -= self.row_h * 1
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- FILAS ---
+        c.setFont("Helvetica", 7)
+        for name, qty in sorted_pmix:
+            display_name = name[:25] + "..." if len(name) > 25 else name
+            c.drawString(self.x_izq, y, display_name)
+            c.drawRightString(self.x_der, y, f"{qty:.2f}".rstrip("0").rstrip("."))
+            y -= self.row_h * 1.5
+
+        y -= self.row_h * 0.2
         self.drawDottedLine(c, y)
 
         c.showPage()

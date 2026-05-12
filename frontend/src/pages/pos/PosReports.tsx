@@ -1,11 +1,4 @@
-import {
-    BarChart3,
-    Clock,
-    DollarSign,
-    Lock,
-    Printer,
-    TrendingUp,
-} from "lucide-react";
+import { Clock, DollarSign, Lock, Printer, TrendingUp } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
 import { useAuth } from "../../context/AuthContext";
@@ -81,16 +74,18 @@ const PosReports = () => {
   // Agrupar por hora (ej. "14:00 - 15:00")
   const salesByHour = sales.reduce((acc: any, sale) => {
     const hour = new Date(sale.date).getHours();
-
-    // Formateamos la hora para que siempre tenga 2 dígitos (ej. "09", "14")
     const hourStr = hour.toString().padStart(2, "0");
-
-    // Creamos un rango súper claro
     const timeLabel = `${hourStr}:00 - ${hourStr}:59`;
 
-    if (!acc[timeLabel]) acc[timeLabel] = { count: 0, total: 0 };
+    const gross = parseFloat(sale.total);
+    const net = gross / 1.18; // Cálculo sin IGV
+
+    if (!acc[timeLabel])
+      acc[timeLabel] = { count: 0, totalGross: 0, totalNet: 0 };
     acc[timeLabel].count += 1;
-    acc[timeLabel].total += parseFloat(sale.total);
+    acc[timeLabel].totalGross += gross;
+    acc[timeLabel].totalNet += net;
+
     return acc;
   }, {});
 
@@ -100,38 +95,72 @@ const PosReports = () => {
     .sort((a, b) => a.time.localeCompare(b.time));
 
   // --- CÁLCULO DEL PRODUCT MIX (PMIX) ---
+  // (Este lo dejas tal cual, ya que la matemática de cantidades funciona perfecto)
   const productMix = sales.reduce((acc: any, sale: any) => {
-    // Verificamos si la venta trae sus detalles
     if (sale.details && Array.isArray(sale.details)) {
       sale.details.forEach((detail: any) => {
-        // Ajusta esto dependiendo de cómo envíe el nombre tu backend
         const productName =
           detail.product?.name || detail.product_name || "Producto Desconocido";
         const qty = parseFloat(detail.quantity);
-        const subtotal = parseFloat(detail.subtotal);
 
         if (!acc[productName]) {
-          acc[productName] = { qty: 0, total: 0 };
+          acc[productName] = { qty: 0 };
         }
         acc[productName].qty += qty;
-        acc[productName].total += subtotal;
       });
     }
     return acc;
   }, {});
 
-  // Convertimos a arreglo y ordenamos de mayor a menor cantidad vendida (Top Ventas)
   const pmixData = Object.entries(productMix)
     .map(([name, data]: any) => ({ name, ...data }))
     .sort((a, b) => b.qty - a.qty);
 
-  // --- FUNCIÓN DE IMPRESIÓN ---
-  const handlePrintXReport = async () => {
-    // Aquí luego llamaremos a tu backend de Django para imprimir el ticket
-    // Ejemplo: await api.get('/cash/shifts/current/print-x-report/');
-    alert("Enviando reporte X a la ticketera... (Requiere endpoint en Django)");
+  // --- FUNCIONES DE IMPRESIÓN (MODO SILENCIOSO) ---
+  const printPdfSilently = async (endpointUrl: string) => {
+    try {
+      // 1. Pedimos el PDF al backend (importante el responseType: "blob")
+      const response = await api.get(endpointUrl, { responseType: "blob" });
+
+      // 2. Creamos un archivo temporal en la memoria del navegador
+      const pdfBlob = new Blob([response.data], { type: "application/pdf" });
+      const pdfUrl = window.URL.createObjectURL(pdfBlob);
+
+      // 3. Creamos una ventana invisible (iframe)
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      iframe.src = pdfUrl;
+      document.body.appendChild(iframe);
+
+      // 4. Cuando el PDF cargue oculto, disparamos la ticketera
+      iframe.onload = () => {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      };
+
+      // 5. Limpiamos la basura de la memoria después de 1 minuto
+      setTimeout(() => {
+        document.body.removeChild(iframe);
+        window.URL.revokeObjectURL(pdfUrl);
+      }, 60000);
+    } catch (error) {
+      console.error("Error imprimiendo:", error);
+      alert(
+        "❌ Error al intentar generar el ticket. Revisa tu conexión o sesión.",
+      );
+    }
   };
 
+  // 👇 Ahora simplemente conectamos cada botón a su URL respectiva en Django
+  const handlePrintHourlyReport = () => {
+    // Asegúrate de que esta ruta coincida exactamente con tu urls.py
+    printPdfSilently("/sales/reports/hourly/print/");
+  };
+
+  const handlePrintPmixReport = () => {
+    // Asegúrate de que esta ruta coincida exactamente con tu urls.py
+    printPdfSilently("/sales/reports/pmix/print/");
+  };
   // PANTALLA DE BLOQUEO DE SEGURIDAD
   if (!isManager) {
     return (
@@ -153,18 +182,6 @@ const PosReports = () => {
       <PosHeader />
 
       <div className="flex-1 overflow-y-auto p-6 max-w-6xl mx-auto w-full space-y-6">
-        <div className="flex justify-between items-center">
-          <h1 className="text-2xl font-black flex items-center gap-2 text-slate-800">
-            <BarChart3 className="text-blue-600" /> Reporte X (Turno Actual)
-          </h1>
-          <button
-            onClick={handlePrintXReport}
-            className="bg-slate-900 hover:bg-black text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 shadow-md transition-all active:scale-95"
-          >
-            <Printer size={18} /> IMPRIMIR REPORTE X
-          </button>
-        </div>
-
         {loading ? (
           <div className="text-center py-20 text-slate-400 animate-pulse font-medium">
             Calculando métricas...
@@ -209,116 +226,130 @@ const PosReports = () => {
               </div>
             </div>
 
-            {/* TABLA DE VENTAS POR HORA */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-5 border-b border-slate-100 bg-slate-50">
-                <h3 className="font-bold text-slate-700">
-                  Desglose por Hora (Horas Pico)
-                </h3>
-              </div>
-              <div className="p-0">
-                <table className="w-full text-left text-sm text-slate-600">
-                  <thead className="bg-slate-50 text-slate-400 uppercase text-xs">
-                    <tr>
-                      <th className="p-4 font-bold">Rango de Hora</th>
-                      <th className="p-4 font-bold text-center">N° Tickets</th>
-                      <th className="p-4 font-bold text-right">
-                        Total Vendido
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {hourlyData.length === 0 ? (
+            {/* ENVOLTURA GRID DE 2 COLUMNAS PARA LAS TABLAS */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6 items-start">
+              {/* 1. TABLA DE DESGLOSE POR HORA */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                  <h3 className="font-bold text-slate-700">
+                    Desglose por Hora
+                  </h3>
+                  <button
+                    onClick={handlePrintHourlyReport}
+                    className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors"
+                    title="Imprimir Desglose"
+                  >
+                    <Printer size={18} />
+                  </button>
+                </div>
+                <div className="p-0 overflow-x-auto">
+                  <table className="w-full text-left text-sm text-slate-600">
+                    <thead className="bg-slate-50 text-slate-400 uppercase text-[10px] tracking-wider">
                       <tr>
-                        <td
-                          colSpan={3}
-                          className="p-8 text-center text-slate-400"
-                        >
-                          No hay ventas registradas en este turno.
-                        </td>
+                        <th className="p-4 font-bold">Rango de Hora</th>
+                        <th className="p-4 font-bold text-center">Tickets</th>
+                        <th className="p-4 font-bold text-right">Bruto</th>
+                        <th className="p-4 font-bold text-right">Neto</th>
                       </tr>
-                    ) : (
-                      hourlyData.map((data: any, index) => (
-                        <tr
-                          key={index}
-                          className="hover:bg-slate-50 transition-colors"
-                        >
-                          <td className="p-4 font-bold text-slate-700 flex items-center gap-2">
-                            <Clock size={14} className="text-slate-400" />{" "}
-                            {data.time}
-                          </td>
-                          <td className="p-4 text-center font-medium">
-                            <span className="bg-slate-100 px-3 py-1 rounded-full text-slate-600">
-                              {data.count}
-                            </span>
-                          </td>
-                          <td className="p-4 text-right font-black text-blue-600">
-                            S/ {data.total.toFixed(2)}
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {hourlyData.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="p-8 text-center text-slate-400"
+                          >
+                            Sin transacciones aún.
                           </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      ) : (
+                        hourlyData.map((data: any, index) => (
+                          <tr
+                            key={index}
+                            className="hover:bg-slate-50 transition-colors"
+                          >
+                            <td className="p-4 font-bold text-slate-700 flex items-center gap-2 whitespace-nowrap">
+                              <Clock size={14} className="text-slate-400" />{" "}
+                              {data.time}
+                            </td>
+                            <td className="p-4 text-center font-medium">
+                              <span className="bg-slate-100 px-3 py-1 rounded-full text-slate-600 text-xs">
+                                {data.count}
+                              </span>
+                            </td>
+                            <td className="p-4 text-right font-bold text-blue-600 whitespace-nowrap">
+                              S/ {data.totalGross.toFixed(2)}
+                            </td>
+                            <td className="p-4 text-right font-bold text-emerald-600 whitespace-nowrap">
+                              S/ {data.totalNet.toFixed(2)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
 
-            {/* TABLA DE PRODUCT MIX (PMIX) */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mt-6">
-              <div className="p-5 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                <h3 className="font-bold text-slate-700">
-                  Mix de Productos (PMIX)
-                </h3>
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-white px-2 py-1 rounded border border-slate-200">
-                  Ranking de Ventas
-                </span>
-              </div>
-              <div className="p-0">
-                <table className="w-full text-left text-sm text-slate-600">
-                  <thead className="bg-slate-50 text-slate-400 uppercase text-[10px] tracking-wider">
-                    <tr>
-                      <th className="p-4 font-bold">Producto</th>
-                      <th className="p-4 font-bold text-center">
-                        Cant. Vendida
-                      </th>
-                      <th className="p-4 font-bold text-right">
-                        Ingreso Generado
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {pmixData.length === 0 ? (
+              {/* 2. TABLA DE PRODUCT MIX (PMIX) */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                  <h3 className="font-bold text-slate-700">
+                    Mix de Productos (PMIX)
+                  </h3>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider bg-white px-2 py-1 rounded border border-slate-200">
+                      Top Ventas
+                    </span>
+                    <button
+                      onClick={handlePrintPmixReport}
+                      className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors"
+                      title="Imprimir PMIX"
+                    >
+                      <Printer size={18} />
+                    </button>
+                  </div>
+                </div>
+                <div className="p-0 overflow-x-auto">
+                  <table className="w-full text-left text-sm text-slate-600">
+                    <thead className="bg-slate-50 text-slate-400 uppercase text-[10px] tracking-wider">
                       <tr>
-                        <td
-                          colSpan={3}
-                          className="p-8 text-center text-slate-400"
-                        >
-                          No hay productos registrados o faltan detalles en la
-                          venta.
-                        </td>
+                        <th className="p-4 font-bold">Producto</th>
+                        <th className="p-4 font-bold text-right">
+                          Cant. Vendida
+                        </th>
                       </tr>
-                    ) : (
-                      pmixData.map((item: any, index: number) => (
-                        <tr
-                          key={index}
-                          className="hover:bg-slate-50 transition-colors"
-                        >
-                          <td className="p-4 font-bold text-slate-700">
-                            {item.name}
-                          </td>
-                          <td className="p-4 text-center font-medium">
-                            <span className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full font-bold">
-                              {item.qty}
-                            </span>
-                          </td>
-                          <td className="p-4 text-right font-black text-slate-700">
-                            S/ {item.total.toFixed(2)}
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {pmixData.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={2}
+                            className="p-8 text-center text-slate-400"
+                          >
+                            No hay productos registrados.
                           </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      ) : (
+                        pmixData.map((item: any, index: number) => (
+                          <tr
+                            key={index}
+                            className="hover:bg-slate-50 transition-colors"
+                          >
+                            <td className="p-4 font-bold text-slate-700">
+                              {item.name}
+                            </td>
+                            <td className="p-4 text-right font-medium">
+                              <span className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full font-bold">
+                                {item.qty}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </>

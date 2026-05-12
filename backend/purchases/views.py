@@ -1,9 +1,11 @@
 from datetime import datetime
 from decimal import Decimal
 
+import openpyxl
 from core.mixins import BranchAccessMixin
 from django.db import transaction
 from django.db.models import Count, Min, Sum
+from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
 from inventory.models import Kardex, Stock
 from rest_framework import filters, status, viewsets
@@ -726,3 +728,70 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             )
         except Exception as e:
             return Response({"error": str(e)}, status=500)
+
+    @action(detail=False, methods=["get"])
+    def export_excel(self, request):
+        # 1. Filtramos las compras usando los mismos filtros de la pantalla y pre-cargamos detalles
+        queryset = self.filter_queryset(self.get_queryset()).prefetch_related("details")
+
+        # 2. Creamos el archivo Excel en memoria
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Historial de Compras"
+
+        # 3. Cabeceras
+        headers = [
+            "Fecha Emisión",
+            "Documento",
+            "Serie-Número",
+            "RUC Proveedor",
+            "Razón Social",
+            "Moneda",
+            "Tipo Costo",
+            "Valor Venta (Subtotal)",
+            "Gravado",
+            "No Gravado",
+            "IGV",
+            "Total",
+            "Estado Pago",
+        ]
+        ws.append(headers)
+
+        # 4. Iteramos y llenamos datos
+        for p in queryset:
+            # Calculamos dinámicamente sumando las líneas
+            gravado = sum(
+                float(d.total_value) for d in p.details.all() if d.tax_percentage > 0
+            )
+            no_gravado = sum(
+                float(d.total_value) for d in p.details.all() if d.tax_percentage == 0
+            )
+
+            ws.append(
+                [
+                    p.issue_date.strftime("%d/%m/%Y") if p.issue_date else "-",
+                    p.get_document_type_display(),
+                    f"{p.series}-{p.number}",
+                    p.supplier.tax_id if p.supplier else "-",
+                    p.supplier.name if p.supplier else "-",
+                    p.get_currency_display(),
+                    p.get_cost_type_display(),
+                    float(p.subtotal),
+                    gravado,
+                    no_gravado,
+                    float(p.tax_amount),
+                    float(p.total),
+                    p.get_payment_status_display(),
+                ]
+            )
+
+        # 5. Devolvemos el archivo como respuesta de descarga
+        response = HttpResponse(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = (
+            'attachment; filename="Historial_Compras.xlsx"'
+        )
+        wb.save(response)
+
+        return response

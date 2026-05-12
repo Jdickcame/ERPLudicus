@@ -98,6 +98,9 @@ class PurchaseSerializer(serializers.ModelSerializer):
     tax_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     total = serializers.DecimalField(max_digits=12, decimal_places=2)
 
+    gravado = serializers.SerializerMethodField()
+    no_gravado = serializers.SerializerMethodField()
+
     # Pago extra
     extra_tax_rate = serializers.DecimalField(
         max_digits=5, decimal_places=2, required=False
@@ -152,8 +155,19 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "details",
             "cost_type",
             "payment_method",
+            "gravado",
+            "no_gravado",
         ]
         read_only_fields = ["user", "registration_date"]
+
+    # 👇 NUEVAS FUNCIONES PARA CALCULAR LÍNEA POR LÍNEA
+    def get_gravado(self, obj):
+        # Sumamos total_value de detalles que SÍ tienen impuestos (IGV > 0)
+        return sum(d.total_value for d in obj.details.all() if d.tax_percentage > 0)
+
+    def get_no_gravado(self, obj):
+        # Sumamos total_value de detalles INAFECTOS/EXONERADOS (IGV == 0)
+        return sum(d.total_value for d in obj.details.all() if d.tax_percentage == 0)
 
     def get_perception_amount(self, obj):
         return obj.extra_tax_amount if obj.extra_tax_type == "PERCEPTION" else 0

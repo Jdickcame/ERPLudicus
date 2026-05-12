@@ -3,6 +3,7 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  Download,
   Edit,
   Eye,
   Filter,
@@ -11,14 +12,14 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react"; // Agregamos useCallback
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal";
 import { useBranch } from "../../context/BranchContext";
 
-// Hook simple para "Debounce" (esperar a que termines de escribir para buscar)
+// Hook simple para "Debounce"
 function useDebounce(value: string, delay: number) {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => {
@@ -35,31 +36,30 @@ const PurchaseList = () => {
   // --- ESTADOS DE DATOS ---
   const [purchases, setPurchases] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [totalCount, setTotalCount] = useState(0); // Total de registros en BD
+  const [totalCount, setTotalCount] = useState(0);
 
   // --- ESTADOS DE FILTROS ---
   const [searchText, setSearchText] = useState("");
-  const debouncedSearch = useDebounce(searchText, 500); // Espera 500ms
+  const debouncedSearch = useDebounce(searchText, 500);
   const [currencyFilter, setCurrencyFilter] = useState("ALL");
-  const [costTypeFilter, setCostTypeFilter] = useState("ALL"); // Nuevo filtro CV/CF
+  const [costTypeFilter, setCostTypeFilter] = useState("ALL");
 
   // --- ESTADOS DE PAGINACIÓN Y ORDEN ---
   const [page, setPage] = useState(1);
   const pageSize = 10;
-  const [ordering, setOrdering] = useState("-issue_date"); // Por defecto fecha desc
+  const [ordering, setOrdering] = useState("-issue_date");
 
   // Modal
   const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(
     null,
   );
 
-  // --- FUNCIÓN DE CARGA (SERVER SIDE) ---
+  // --- FUNCIÓN DE CARGA ---
   const fetchPurchases = useCallback(async () => {
     if (!currentBranch) return;
     setLoading(true);
 
     try {
-      // Construimos los parámetros URL dinámicamente
       const params: any = {
         branch_id: currentBranch.id,
         page: page,
@@ -67,14 +67,12 @@ const PurchaseList = () => {
         ordering: ordering,
       };
 
-      // Agregamos filtros solo si tienen valor
       if (debouncedSearch) params.search = debouncedSearch;
       if (currencyFilter !== "ALL") params.currency = currencyFilter;
       if (costTypeFilter !== "ALL") params.cost_type = costTypeFilter;
 
       const response = await api.get("/purchases/purchases/", { params });
 
-      // DRF devuelve { count: 100, next: "...", results: [...] }
       setPurchases(response.data.results || []);
       setTotalCount(response.data.count || 0);
     } catch (error) {
@@ -91,19 +89,16 @@ const PurchaseList = () => {
     ordering,
   ]);
 
-  // Recargar cuando cambie cualquier filtro
   useEffect(() => {
     fetchPurchases();
   }, [fetchPurchases]);
 
-  // Resetear página a 1 si cambian los filtros (pero no el orden)
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch, currencyFilter, costTypeFilter, currentBranch]);
 
   // --- MANEJADORES ---
   const handleSort = (field: string) => {
-    // Si ya estamos ordenando por ese campo, invertimos el signo
     if (ordering === field) setOrdering(`-${field}`);
     else if (ordering === `-${field}`) setOrdering(field);
     else setOrdering(field);
@@ -120,13 +115,41 @@ const PurchaseList = () => {
     if (!window.confirm("¿Eliminar compra? Esto revertirá el stock.")) return;
     try {
       await api.delete(`/purchases/purchases/${id}/`);
-      fetchPurchases(); // Recargar datos frescos
+      fetchPurchases();
     } catch (error) {
       alert("Error al eliminar");
     }
   };
 
-  // Cálculos de paginación visual
+  // 👇 NUEVA FUNCIÓN PARA EXPORTAR EXCEL
+  const handleExportExcel = async () => {
+    if (!currentBranch) return;
+    try {
+      const params: any = { branch_id: currentBranch.id };
+      if (debouncedSearch) params.search = debouncedSearch;
+      if (currencyFilter !== "ALL") params.currency = currencyFilter;
+      if (costTypeFilter !== "ALL") params.cost_type = costTypeFilter;
+
+      // Pedimos el archivo como Blob
+      const response = await api.get("/purchases/purchases/export_excel/", {
+        params,
+        responseType: "blob",
+      });
+
+      // Forzamos la descarga en el navegador
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", "Historial_Compras.xlsx");
+      document.body.appendChild(link);
+      link.click();
+      link.parentNode?.removeChild(link);
+    } catch (error) {
+      console.error("Error al exportar:", error);
+      alert("Ocurrió un error al descargar el archivo Excel.");
+    }
+  };
+
   const totalPages = Math.ceil(totalCount / pageSize);
 
   return (
@@ -144,17 +167,26 @@ const PurchaseList = () => {
             Total registros: <strong>{totalCount}</strong>
           </p>
         </div>
-        <Link
-          to="/purchases/new"
-          className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-700 transition shadow-md"
-        >
-          <Plus size={20} /> Nueva Compra
-        </Link>
+
+        {/* 👇 BOTONES DE ACCIÓN */}
+        <div className="flex gap-3">
+          <button
+            onClick={handleExportExcel}
+            className="bg-emerald-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-emerald-700 transition shadow-md font-medium"
+          >
+            <Download size={18} /> Excel
+          </button>
+          <Link
+            to="/purchases/new"
+            className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-700 transition shadow-md font-medium"
+          >
+            <Plus size={18} /> Nueva Compra
+          </Link>
+        </div>
       </div>
 
       {/* BARRA DE FILTROS */}
       <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 mb-6 grid grid-cols-1 md:grid-cols-4 gap-4">
-        {/* 1. Buscador Texto */}
         <div className="md:col-span-2 relative">
           <Search className="absolute left-3 top-3 text-slate-400" size={20} />
           <input
@@ -165,8 +197,6 @@ const PurchaseList = () => {
             onChange={(e) => setSearchText(e.target.value)}
           />
         </div>
-
-        {/* 2. Filtro Moneda */}
         <div className="relative">
           <Filter className="absolute left-3 top-3 text-slate-400" size={18} />
           <select
@@ -179,8 +209,6 @@ const PurchaseList = () => {
             <option value="USD">🇺🇸 Dólares ($)</option>
           </select>
         </div>
-
-        {/* 3. Filtro Costo (NUEVO) */}
         <div className="relative">
           <Filter className="absolute left-3 top-3 text-slate-400" size={18} />
           <select
@@ -196,42 +224,41 @@ const PurchaseList = () => {
       </div>
 
       {/* TABLA */}
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden mb-4">
+      <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-x-auto mb-4">
         {loading ? (
           <div className="py-20 flex justify-center items-center gap-3 text-slate-500">
             <Loader2 className="animate-spin" /> Cargando datos...
           </div>
         ) : (
-          <table className="w-full text-sm text-left text-slate-500">
-            <thead className="text-xs text-slate-700 uppercase bg-slate-50 border-b select-none">
+          <table className="w-full text-xs text-left text-slate-500">
+            <thead className="text-[10px] text-slate-700 uppercase bg-slate-50 border-b select-none tracking-wider">
               <tr>
                 <th
-                  className="px-6 py-3 cursor-pointer hover:bg-slate-100"
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-100 whitespace-nowrap"
                   onClick={() => handleSort("issue_date")}
                 >
                   <div className="flex items-center">
                     Fecha {getSortIcon("issue_date")}
                   </div>
                 </th>
-                <th className="px-6 py-3">Documento</th>
+                <th className="px-4 py-3 whitespace-nowrap">Documento</th>
                 <th
-                  className="px-6 py-3 cursor-pointer hover:bg-slate-100"
+                  className="px-4 py-3 cursor-pointer hover:bg-slate-100"
                   onClick={() => handleSort("supplier__name")}
                 >
                   <div className="flex items-center">
-                    Proveedor {getSortIcon("supplier__name")}
+                    Proveedor / RUC {getSortIcon("supplier__name")}
                   </div>
                 </th>
+
+                {/* 👇 NUEVAS COLUMNAS FINANCIERAS */}
+                <th className="px-3 py-3 text-right">V. Venta</th>
+                <th className="px-3 py-3 text-right">Gravado</th>
+                <th className="px-3 py-3 text-right">No Grav.</th>
+                <th className="px-3 py-3 text-right">IGV</th>
+
                 <th
-                  className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100"
-                  onClick={() => handleSort("cost_type")}
-                >
-                  <div className="flex justify-center items-center">
-                    Costo {getSortIcon("cost_type")}
-                  </div>
-                </th>
-                <th
-                  className="px-6 py-3 text-right cursor-pointer hover:bg-slate-100"
+                  className="px-4 py-3 text-right cursor-pointer hover:bg-slate-100"
                   onClick={() => handleSort("total_net_pay")}
                 >
                   <div className="flex justify-end items-center">
@@ -239,20 +266,23 @@ const PurchaseList = () => {
                   </div>
                 </th>
                 <th
-                  className="px-6 py-3 text-center cursor-pointer hover:bg-slate-100"
+                  className="px-4 py-3 text-center cursor-pointer hover:bg-slate-100"
                   onClick={() => handleSort("payment_status")}
                 >
                   <div className="flex justify-center items-center">
                     Estado {getSortIcon("payment_status")}
                   </div>
                 </th>
-                <th className="px-6 py-3 text-center">Acciones</th>
+                <th className="px-4 py-3 text-center">Acciones</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="text-xs">
               {purchases.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-center py-10 text-slate-400">
+                  <td
+                    colSpan={10}
+                    className="text-center py-10 text-slate-400 text-sm"
+                  >
                     No se encontraron registros.
                   </td>
                 </tr>
@@ -262,45 +292,51 @@ const PurchaseList = () => {
                     key={purchase.id}
                     className="bg-white border-b hover:bg-slate-50 transition"
                   >
-                    <td className="px-6 py-4 whitespace-nowrap">
+                    <td className="px-4 py-3 whitespace-nowrap">
                       {purchase.issue_date}
                     </td>
-                    <td className="px-6 py-4 font-medium text-slate-900">
+                    <td className="px-4 py-3 font-medium text-slate-900 whitespace-nowrap">
                       {purchase.document_type} <br />
-                      <span className="text-xs text-slate-500 font-normal">
+                      <span className="text-slate-500 font-normal">
                         {purchase.series}-{purchase.number}
                       </span>
                     </td>
                     <td
-                      className="px-6 py-4 truncate max-w-[200px]"
+                      className="px-4 py-3 truncate max-w-[180px]"
                       title={purchase.supplier_name}
                     >
-                      {purchase.supplier_name}
+                      <div className="font-semibold text-slate-800 truncate">
+                        {purchase.supplier_name}
+                      </div>
+                      <div className="text-slate-400">
+                        RUC: {purchase.supplier_tax_id}
+                      </div>
                     </td>
 
-                    {/* COSTO */}
-                    <td className="px-6 py-4 text-center">
-                      <span
-                        className={`px-2 py-1 rounded text-[10px] font-bold border ${
-                          purchase.cost_type === "CV"
-                            ? "bg-purple-50 text-purple-700 border-purple-200"
-                            : "bg-orange-50 text-orange-700 border-orange-200"
-                        }`}
-                      >
-                        {purchase.cost_type === "CV" ? "VARIABLE" : "FIJO"}
-                      </span>
+                    {/* 👇 DATOS FINANCIEROS */}
+                    <td className="px-3 py-3 text-right text-slate-600">
+                      {/* Usamos 'subtotal' que es como viene del backend */}
+                      {Number(purchase.subtotal || 0).toFixed(2)}
+                    </td>
+                    <td className="px-3 py-3 text-right text-slate-600">
+                      {Number(purchase.gravado || 0).toFixed(2)}
+                    </td>
+                    <td className="px-3 py-3 text-right text-slate-600">
+                      {Number(purchase.no_gravado || 0).toFixed(2)}
+                    </td>
+                    <td className="px-3 py-3 text-right text-slate-600">
+                      {/* Usamos 'tax_amount' que es el nombre real del IGV en tu BD */}
+                      {Number(purchase.tax_amount || 0).toFixed(2)}
                     </td>
 
-                    {/* TOTAL */}
                     <td
-                      className={`px-6 py-4 text-right font-bold ${purchase.currency === "USD" ? "text-green-600" : "text-slate-900"}`}
+                      className={`px-4 py-3 text-right font-bold whitespace-nowrap ${purchase.currency === "USD" ? "text-emerald-600" : "text-blue-600"}`}
                     >
                       {purchase.currency === "USD" ? "$ " : "S/ "}
                       {Number(purchase.total).toFixed(2)}
                     </td>
 
-                    {/* ESTADO */}
-                    <td className="px-6 py-4 text-center">
+                    <td className="px-4 py-3 text-center">
                       <span
                         className={`px-2 py-1 rounded-full text-[10px] font-bold ${
                           purchase.payment_status === "PAID"
@@ -314,28 +350,27 @@ const PurchaseList = () => {
                       </span>
                     </td>
 
-                    {/* ACCIONES */}
-                    <td className="px-6 py-4 text-center">
-                      <div className="flex items-center justify-center gap-2">
+                    <td className="px-4 py-3 text-center">
+                      <div className="flex items-center justify-center gap-1">
                         <button
                           onClick={() => setSelectedPurchaseId(purchase.id)}
-                          className="text-blue-600 hover:bg-blue-50 p-2 rounded-full transition"
+                          className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-full transition"
                         >
-                          <Eye size={18} />
+                          <Eye size={16} />
                         </button>
                         <button
                           onClick={() =>
                             navigate(`/purchases/edit/${purchase.id}`)
                           }
-                          className="text-slate-500 hover:text-orange-500 p-2 rounded-full transition"
+                          className="text-slate-500 hover:text-orange-500 p-1.5 rounded-full transition"
                         >
-                          <Edit size={18} />
+                          <Edit size={16} />
                         </button>
                         <button
                           onClick={() => handleDelete(purchase.id)}
-                          className="text-slate-500 hover:text-red-500 p-2 rounded-full transition"
+                          className="text-slate-500 hover:text-red-500 p-1.5 rounded-full transition"
                         >
-                          <Trash2 size={18} />
+                          <Trash2 size={16} />
                         </button>
                       </div>
                     </td>
@@ -347,7 +382,7 @@ const PurchaseList = () => {
         )}
       </div>
 
-      {/* 👇 PAGINACIÓN REAL (SERVER SIDE) */}
+      {/* PAGINACIÓN */}
       <div className="flex justify-between items-center bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
         <div className="text-sm text-slate-500">
           Página <b>{page}</b> de <b>{totalPages || 1}</b> ({totalCount}{" "}
@@ -361,7 +396,6 @@ const PurchaseList = () => {
           >
             <ChevronLeft size={16} />
           </button>
-
           <button
             onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
             disabled={page === totalPages || totalPages === 0 || loading}
