@@ -7,7 +7,9 @@ import {
   Edit,
   FileText,
   Loader2,
-  Plus, // Icono nuevo
+  PackagePlus,
+  PieChart,
+  Plus,
   RefreshCw,
   Save,
   Trash2,
@@ -24,15 +26,30 @@ interface Option {
   value: string | number;
   label: string;
 }
+interface Product {
+  id: number;
+  name: string;
+  sku: string;
+  last_cost?: number | string;
+}
 
 interface PurchaseDetail {
   id?: number;
   product_id: number | null;
   description: string;
-  quantity: number;
-  unit_value: number;
-  total_value: number;
+  category: string | number;
+  area: string | number;
+  quantity: number | string;
+  unit_value: number | string;
+  total_value: number | string;
   tax_percentage: number;
+}
+
+interface BudgetStatus {
+  area: string | number;
+  remaining: number;
+  limit: number;
+  area_label: string;
 }
 
 const EditPurchase = () => {
@@ -48,6 +65,7 @@ const EditPurchase = () => {
   const [docTypeOptions, setDocTypeOptions] = useState<Option[]>([]);
   const [igvOptions, setIgvOptions] = useState<Option[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [areaOptions, setAreaOptions] = useState<Option[]>([]);
   const [paymentConditionOptions, setPaymentConditionOptions] = useState<
     Option[]
@@ -59,7 +77,7 @@ const EditPurchase = () => {
   const [paymentMethodOptions, setPaymentMethodOptions] = useState<Option[]>(
     [],
   );
-  const [budgets, setBudgets] = useState<any[]>([]);
+  const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
 
   // --- ESTADOS DEL PROVEEDOR ---
   const [rucSearch, setRucSearch] = useState("");
@@ -71,13 +89,14 @@ const EditPurchase = () => {
   const [extraTaxRate, setExtraTaxRate] = useState(0);
   const [extraTaxAmount, setExtraTaxAmount] = useState("0");
 
-  // --- 🔥 ESTADOS DE MONEDA (NUEVO) ---
+  // --- ESTADOS DE MONEDA ---
   const [currency, setCurrency] = useState<"PEN" | "USD">("PEN");
   const [exchangeRate, setExchangeRate] = useState<string>("1.000");
   const [isLoadingRate, setIsLoadingRate] = useState(false);
 
   const [initialDate, setInitialDate] = useState("");
 
+  // --- CABECERA ---
   const [header, setHeader] = useState({
     document_type: "FACTURA",
     series: "",
@@ -85,8 +104,6 @@ const EditPurchase = () => {
     issue_date: "",
     due_date: "",
     budget_period: "",
-    category: "",
-    area: "",
     payment_condition: "CASH",
     payment_status: "PAID",
     cost_type: "CF",
@@ -95,18 +112,15 @@ const EditPurchase = () => {
 
   const [details, setDetails] = useState<PurchaseDetail[]>([]);
 
-  // --- 🔥 LÓGICA DE TIPO DE CAMBIO ---
+  // --- LÓGICA DE TIPO DE CAMBIO ---
   const fetchExchangeRate = async (dateStr: string) => {
     if (!dateStr) return;
     setIsLoadingRate(true);
     try {
-      // Usamos el endpoint global
       const response = await api.get(
         `/exchange-rate/get_rate/?date=${dateStr}`,
       );
-      if (response.data) {
-        setExchangeRate(String(response.data.sell_rate));
-      }
+      if (response.data) setExchangeRate(String(response.data.sell_rate));
     } catch (error) {
       console.error("Error buscando TC:", error);
     } finally {
@@ -114,9 +128,7 @@ const EditPurchase = () => {
     }
   };
 
-  // Efecto: Busca TC solo si la fecha CAMBIA respecto a la original
   useEffect(() => {
-    // Solo buscamos si ya terminó de cargar, hay fecha, Y ES DIFERENTE A LA ORIGINAL
     if (
       !loadingData &&
       header.issue_date &&
@@ -138,12 +150,13 @@ const EditPurchase = () => {
           ? data.budget_period.slice(0, 7)
           : data.issue_date.slice(0, 7);
 
-        const [budgetsRes, choicesRes, catRes] = await Promise.all([
+        const [budgetsRes, choicesRes, catRes, prodRes] = await Promise.all([
           api.get(
             `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${loadedPeriod}`,
           ),
           api.get("/purchases/purchases/choices/"),
           api.get("/purchases/categories/"),
+          api.get("/inventory/products/"),
         ]);
 
         setBudgets(budgetsRes.data);
@@ -155,6 +168,9 @@ const EditPurchase = () => {
         setCostTypeOptions(choicesRes.data.cost_types || []);
         setPaymentMethodOptions(choicesRes.data.payment_methods || []);
         setCategories(catRes.data.results || catRes.data);
+        setProducts(
+          Array.isArray(prodRes.data) ? prodRes.data : prodRes.data.results,
+        );
 
         setHeader({
           document_type: data.document_type,
@@ -163,8 +179,6 @@ const EditPurchase = () => {
           issue_date: data.issue_date,
           budget_period: loadedPeriod,
           due_date: data.due_date || "",
-          category: data.category,
-          area: data.area,
           payment_condition: data.payment_condition,
           payment_status: data.payment_status,
           cost_type: data.cost_type || "CF",
@@ -172,12 +186,10 @@ const EditPurchase = () => {
         });
 
         setInitialDate(data.issue_date);
-        // 🔥 CARGAMOS MONEDA Y TC
         setCurrency(data.currency || "PEN");
         setExchangeRate(
           data.exchange_rate ? String(data.exchange_rate) : "1.000",
         );
-
         setSupplierId(data.supplier);
         setSupplierName(data.supplier_name);
         setRucSearch(data.supplier_tax_id || "");
@@ -204,6 +216,8 @@ const EditPurchase = () => {
             id: d.id,
             product_id: d.product,
             description: d.description,
+            category: d.category || "",
+            area: d.area || "",
             quantity: Number(d.quantity),
             unit_value: Number(d.unit_value),
             total_value: Number(d.total_value),
@@ -228,7 +242,7 @@ const EditPurchase = () => {
           `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
         )
         .then((res) => setBudgets(res.data))
-        .catch((err) => console.error(err));
+        .catch(console.error);
     }
   }, [header.budget_period, currentBranch]);
 
@@ -237,22 +251,18 @@ const EditPurchase = () => {
     (sum, item) => sum + Number(item.total_value),
     0,
   );
-
   const taxAmount = details.reduce(
     (sum, item) =>
       sum + Number(item.total_value) * (Number(item.tax_percentage) / 100),
     0,
   );
-
   const totalDocument = subtotal + taxAmount;
 
   // --- IMPUESTOS EXTRA ---
   useEffect(() => {
     if (extraTaxType === "RETENTION" || extraTaxType === "DETRACTION") {
       let calculated = totalDocument * (extraTaxRate / 100);
-      if (extraTaxType === "DETRACTION") {
-        calculated = Math.round(calculated);
-      }
+      if (extraTaxType === "DETRACTION") calculated = Math.round(calculated);
       setExtraTaxAmount(calculated.toFixed(2));
     } else if (extraTaxType === "NONE") {
       setExtraTaxAmount("0");
@@ -261,11 +271,9 @@ const EditPurchase = () => {
 
   const extraTaxNum = parseFloat(extraTaxAmount) || 0;
   let totalNetPay = totalDocument;
-  if (extraTaxType === "PERCEPTION") {
-    totalNetPay = totalDocument + extraTaxNum;
-  } else if (extraTaxType === "RETENTION" || extraTaxType === "DETRACTION") {
+  if (extraTaxType === "PERCEPTION") totalNetPay = totalDocument + extraTaxNum;
+  else if (extraTaxType === "RETENTION" || extraTaxType === "DETRACTION")
     totalNetPay = totalDocument - extraTaxNum;
-  }
 
   // --- MANEJO DE TABLA ---
   const updateRow = (
@@ -275,9 +283,26 @@ const EditPurchase = () => {
   ) => {
     const newDetails = [...details];
     const row = { ...newDetails[index], [field]: value };
-    if (field === "quantity" || field === "unit_value") {
+
+    if (field === "product_id") {
+      const prod = products.find((p) => p.id === Number(value));
+      if (prod) {
+        row.description = prod.name;
+        if (prod.last_cost && !row.unit_value)
+          row.unit_value = Number(prod.last_cost);
+      } else {
+        row.description = "";
+      }
+    }
+
+    if (
+      field === "quantity" ||
+      field === "unit_value" ||
+      field === "product_id"
+    ) {
       row.total_value = Number(row.quantity) * Number(row.unit_value);
     }
+
     newDetails[index] = row;
     setDetails(newDetails);
   };
@@ -288,6 +313,8 @@ const EditPurchase = () => {
       {
         product_id: null,
         description: "",
+        category: "",
+        area: "",
         quantity: 1,
         unit_value: 0,
         total_value: 0,
@@ -302,31 +329,34 @@ const EditPurchase = () => {
 
   // --- GUARDAR CAMBIOS ---
   const handleUpdate = async () => {
+    const hasEmptyLine = details.some((d) => !d.category || !d.area);
+    if (hasEmptyLine)
+      return alert(
+        "⚠️ Todas las líneas deben tener asignada un Área y una Categoría.",
+      );
+
     const payload = {
       ...header,
       supplier: supplierId,
       branch_id: currentBranch?.id,
       due_date: header.payment_status === "PENDING" ? header.due_date : null,
       budget_period: `${header.budget_period}-01`,
-
-      // 🔥 ENVIAMOS DATOS DE MONEDA
       currency: currency,
       exchange_rate: currency === "PEN" ? "1.000" : exchangeRate,
-
       subtotal: subtotal.toFixed(2),
       tax_amount: taxAmount.toFixed(2),
       total: totalDocument.toFixed(2),
-
       extra_tax_type: extraTaxType,
       extra_tax_rate: extraTaxRate.toFixed(2),
       extra_tax_amount: parseFloat(extraTaxAmount).toFixed(2),
       total_net_pay: totalNetPay.toFixed(2),
-
       tax_rate: 0.18,
       details: details.map((d) => ({
-        id: d.id, // Importante mandar ID para que edite y no cree duplicados
+        id: d.id,
         product: d.product_id,
         description: d.description,
+        category: d.category || null,
+        area: d.area || null,
         quantity: d.quantity,
         unit_value: Number(d.unit_value).toFixed(2),
         total_value: Number(d.total_value).toFixed(2),
@@ -351,35 +381,70 @@ const EditPurchase = () => {
     }
   };
 
-  const renderBudgetAlert = () => {
-    const areaBudget = budgets.find((b) => b.area == header.area);
-    if (!areaBudget || !header.area) return null;
+  // 🔥 NUEVA VERSIÓN: PANEL ELEGANTE DE PRESUPUESTO
+  const renderBudgetAlerts = () => {
+    const areaTotals: Record<string, number> = {};
+    let hasAreasSelected = false;
 
-    // 🔥 AJUSTE: Si es USD, convierte mentalmente a Soles para comparar con presupuesto
-    // Nota: 'remaining' viene del backend y ya tiene descontada esta compra (versión guardada)
-    // Para ser ultra precisos habría que sumar el monto viejo y restar el nuevo, pero
-    // por simplicidad mostramos el saldo disponible actual del sistema.
+    details.forEach((row) => {
+      if (
+        row.area &&
+        (Number(row.quantity) > 0 || Number(row.total_value) > 0)
+      ) {
+        hasAreasSelected = true;
+        const rowTotal =
+          Number(row.total_value) * (1 + Number(row.tax_percentage) / 100);
+        const rowTotalSoles =
+          currency === "USD" ? rowTotal * parseFloat(exchangeRate) : rowTotal;
+        areaTotals[row.area] = (areaTotals[row.area] || 0) + rowTotalSoles;
+      }
+    });
 
-    const remaining = areaBudget.remaining;
-    const isExceeded = remaining < 0;
+    if (!hasAreasSelected) return null;
 
-    if (isExceeded) {
-      return (
-        <div className="mt-1.5 p-2 bg-red-50 border border-red-200 text-red-700 rounded-md text-xs flex items-start gap-2 animate-in zoom-in">
-          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-          <div>
-            <p className="font-bold">¡Presupuesto Excedido!</p>
-            <p>Saldo actual: S/ {remaining.toFixed(2)}</p>
-          </div>
-        </div>
-      );
-    }
     return (
-      <div className="mt-1 text-xs flex justify-between px-1 text-slate-500">
-        <span>Disponible ({header.budget_period}):</span>
-        <span className="font-bold text-green-600">
-          S/ {remaining.toFixed(2)}
-        </span>
+      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 animate-in fade-in">
+        <h4 className="text-sm font-bold text-slate-600 uppercase tracking-wider mb-4 flex items-center gap-2">
+          <PieChart size={18} className="text-blue-500" />
+          Impacto en Presupuestos
+        </h4>
+        <div className="space-y-3">
+          {Object.entries(areaTotals).map(([areaId]) => {
+            const budget = budgets.find(
+              (b) => String(b.area) === String(areaId),
+            );
+            if (!budget) return null;
+
+            // En Edición, el remaining ya tiene descontado el gasto anterior.
+            const futureRemaining = budget.remaining;
+            const isExceeded = futureRemaining < 0;
+
+            return (
+              <div
+                key={areaId}
+                className={`p-3 rounded-xl border flex justify-between items-center transition-colors ${
+                  isExceeded
+                    ? "bg-red-50 border-red-200"
+                    : "bg-green-50 border-green-200"
+                }`}
+              >
+                <span className="font-bold text-slate-700 text-sm">
+                  {budget.area_label}
+                </span>
+                {isExceeded ? (
+                  <span className="font-black text-red-600 text-sm flex items-center gap-1.5">
+                    <AlertTriangle size={16} />
+                    Excedido: S/ {Math.abs(futureRemaining).toFixed(2)}
+                  </span>
+                ) : (
+                  <span className="font-bold text-green-700 text-sm">
+                    Saldo Actual: S/ {futureRemaining.toFixed(2)}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   };
@@ -425,15 +490,13 @@ const EditPurchase = () => {
         </div>
       </div>
 
-      {/* 💰 SECCIÓN MONEDA (IGUAL A NEW PURCHASE) */}
-      <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 mb-6">
+      {/* MONEDA */}
+      <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200 mb-6 relative z-10">
         <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 border-b pb-2 flex items-center gap-2">
           <DollarSign size={16} className="text-green-600" /> Configuración de
           Moneda
         </h3>
-
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-end">
-          {/* 1. SELECTOR */}
           <div>
             <label className="text-sm font-medium text-slate-700 mb-2 block">
               Moneda
@@ -441,33 +504,23 @@ const EditPurchase = () => {
             <div className="flex bg-slate-100 p-1 rounded-lg">
               <button
                 onClick={() => setCurrency("PEN")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
-                  currency === "PEN"
-                    ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "PEN" ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
               >
                 S/ Soles
               </button>
               <button
                 onClick={() => setCurrency("USD")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
-                  currency === "USD"
-                    ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "USD" ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
               >
                 $ Dólares
               </button>
             </div>
           </div>
-
-          {/* 2. INPUT TC */}
           <div
             className={`transition-opacity duration-200 ${currency === "PEN" ? "opacity-50 grayscale" : "opacity-100"}`}
           >
             <label className="text-sm font-medium text-slate-700 flex justify-between">
-              Tipo de Cambio
+              Tipo de Cambio{" "}
               {isLoadingRate && (
                 <span className="text-xs text-blue-500 animate-pulse flex items-center gap-1">
                   <RefreshCw size={10} className="animate-spin" /> Buscando...
@@ -488,8 +541,6 @@ const EditPurchase = () => {
               </span>
             </div>
           </div>
-
-          {/* 3. VISUALIZADOR */}
           {currency === "USD" && (
             <div className="bg-orange-50 border border-orange-100 p-3 rounded-md text-right">
               <span className="text-xs text-orange-400 font-bold block">
@@ -503,8 +554,8 @@ const EditPurchase = () => {
         </div>
       </div>
 
-      {/* DATOS DOCUMENTO */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6">
+      {/* DOCUMENTO (SIN ÁREA NI CATEGORÍA) */}
+      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6 relative z-10">
         <h3 className="text-sm font-bold text-slate-500 uppercase mb-5 border-b pb-3 flex items-center gap-2">
           <FileText size={18} className="text-orange-500" /> Información del
           Documento
@@ -524,7 +575,6 @@ const EditPurchase = () => {
               }
             />
           </div>
-
           <div className="md:col-span-2">
             <label className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1 block">
               Periodo
@@ -538,7 +588,6 @@ const EditPurchase = () => {
               }
             />
           </div>
-
           <div className="md:col-span-3">
             <SearchableSelect
               label="Tipo Doc."
@@ -549,7 +598,6 @@ const EditPurchase = () => {
               }
             />
           </div>
-
           <div className="md:col-span-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
               Serie
@@ -563,7 +611,6 @@ const EditPurchase = () => {
               }
             />
           </div>
-
           <div className="md:col-span-3">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
               Número
@@ -577,7 +624,6 @@ const EditPurchase = () => {
             />
           </div>
 
-          {/* FILA 2 */}
           <div className="md:col-span-3">
             <SearchableSelect
               label="Tipo de Costo"
@@ -598,29 +644,7 @@ const EditPurchase = () => {
               }
             />
           </div>
-          <div className="md:col-span-6">
-            <SearchableSelect
-              label="Categoría"
-              options={categories.map((c) => ({ value: c.id, label: c.name }))}
-              value={header.category}
-              onChange={(val) =>
-                setHeader({ ...header, category: val as string })
-              }
-            />
-          </div>
-
-          {/* FILA 3 */}
-          <div className="md:col-span-4 relative">
-            <SearchableSelect
-              label="Área Destino"
-              options={areaOptions}
-              value={header.area}
-              onChange={(val) => setHeader({ ...header, area: val as string })}
-            />
-            {renderBudgetAlert()}
-          </div>
-
-          <div className="md:col-span-4">
+          <div className="md:col-span-3">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
               Condición
             </label>
@@ -638,8 +662,7 @@ const EditPurchase = () => {
               ))}
             </select>
           </div>
-
-          <div className="md:col-span-4">
+          <div className="md:col-span-3">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
               Estado Pago
             </label>
@@ -678,40 +701,98 @@ const EditPurchase = () => {
         </div>
       </div>
 
-      {/* TABLA DETALLES */}
-      <div className="bg-white rounded-xl shadow-sm border overflow-hidden mb-6">
-        <table className="w-full text-sm">
+      {/* TABLA DETALLES (AHORA CON ÁREA Y CATEGORÍA) */}
+      {/* ✅ CORRECCIÓN 1: overflow-visible para que los menús no se corten */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-visible mb-6">
+        <table className="w-full text-sm text-left">
           <thead className="bg-slate-50 border-b">
             <tr className="text-slate-600 font-bold uppercase text-[11px]">
-              <th className="p-4 text-left">Descripción / Producto</th>
+              <th className="p-4 w-1/4 rounded-tl-lg">
+                Descripción / Producto
+              </th>
+              <th className="p-4 w-1/4">Centro de Costo</th>
               <th className="p-4 text-center w-20">Cant.</th>
-              <th className="p-4 text-center w-28">P. Unit</th>
-              <th className="p-4 text-center w-24">Tasa IGV</th>
-              <th className="p-4 text-right w-32">Subtotal</th>
-              <th className="p-4 w-32 text-right text-blue-600">Total</th>
-              <th className="p-4 text-center w-16">Acción</th>
+              <th className="p-4 text-center w-24">P. Unit</th>
+              <th className="p-4 text-center w-20">IGV</th>
+              <th className="p-4 text-right w-28 text-blue-600">Total</th>
+              <th className="p-4 text-center w-12 rounded-tr-lg">Acción</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
+          <tbody className="divide-y divide-slate-100">
             {details.map((row, index) => {
-              // 🧮 CÁLCULO DEL TOTAL CON IGV POR FILA
               const rowTotalWithTax =
                 Number(row.total_value) *
                 (1 + Number(row.tax_percentage) / 100);
-
               return (
                 <tr key={index} className="hover:bg-slate-50 transition-colors">
-                  <td className="p-3">
-                    <input
-                      type="text"
-                      className="w-full border p-1.5 rounded text-sm outline-none focus:border-blue-400"
-                      value={row.description}
-                      onChange={(e) =>
-                        updateRow(index, "description", e.target.value)
-                      }
-                    />
+                  {/* COL 1: PRODUCTO */}
+                  <td className="p-2 align-top">
+                    <div className="flex flex-col gap-1 relative">
+                      <div className="flex gap-1 items-start">
+                        <div className="w-full min-w-[150px]">
+                          <SearchableSelect
+                            placeholder="Buscar producto..."
+                            options={[
+                              { value: "", label: "-- Solo Gasto --" },
+                              ...products.map((p) => ({
+                                value: p.id,
+                                label: `${p.sku} - ${p.name}`,
+                              })),
+                            ]}
+                            value={row.product_id || ""}
+                            onChange={(val) =>
+                              updateRow(index, "product_id", val)
+                            }
+                          />
+                        </div>
+                        <button
+                          onClick={() =>
+                            window.open("/inventory/new", "_blank")
+                          }
+                          className="bg-slate-100 p-1.5 rounded hover:bg-slate-200 text-slate-600"
+                        >
+                          <PackagePlus size={16} />
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        className="border p-1.5 rounded w-full text-xs"
+                        placeholder={
+                          row.product_id
+                            ? "Descripción..."
+                            : "Describe el gasto..."
+                        }
+                        value={row.description}
+                        onChange={(e) =>
+                          updateRow(index, "description", e.target.value)
+                        }
+                      />
+                    </div>
                   </td>
-                  <td className="p-3 text-center">
+
+                  {/* COL 2: CENTRO DE COSTO */}
+                  <td className="p-2 align-top">
+                    <div className="flex flex-col gap-1">
+                      <SearchableSelect
+                        placeholder="Categoría..."
+                        options={categories.map((c) => ({
+                          value: c.id,
+                          label: c.name,
+                        }))}
+                        value={row.category}
+                        onChange={(val) => updateRow(index, "category", val)}
+                      />
+                      <SearchableSelect
+                        placeholder="Área Destino..."
+                        options={areaOptions}
+                        value={row.area}
+                        onChange={(val) => updateRow(index, "area", val)}
+                      />
+                    </div>
+                  </td>
+
+                  {/* RESTO DE COLUMNAS */}
+                  <td className="p-2 align-top text-center">
                     <input
                       type="number"
                       className="w-full border p-1.5 rounded text-center font-medium outline-none focus:border-blue-400"
@@ -721,7 +802,7 @@ const EditPurchase = () => {
                       }
                     />
                   </td>
-                  <td className="p-3 text-center">
+                  <td className="p-2 align-top text-center">
                     <input
                       type="number"
                       className="w-full border p-1.5 rounded text-right font-medium outline-none focus:border-blue-400"
@@ -731,7 +812,7 @@ const EditPurchase = () => {
                       }
                     />
                   </td>
-                  <td className="p-3 text-center">
+                  <td className="p-2 align-top text-center">
                     <select
                       className="border p-1.5 rounded w-full text-xs bg-white font-bold text-blue-700 outline-none"
                       value={row.tax_percentage}
@@ -750,24 +831,18 @@ const EditPurchase = () => {
                       ))}
                     </select>
                   </td>
-
-                  {/* SUBTOTAL (NETO) */}
-                  <td className="p-3 text-right font-medium text-slate-700">
-                    {currency === "PEN" ? "S/" : "$"}{" "}
-                    {Number(row.total_value).toFixed(2)}
-                  </td>
-
-                  {/* 👇 CELDA TOTAL + IGV (CALCULADA) */}
-                  <td className="p-3 text-right font-bold text-blue-700 bg-blue-50/30">
+                  <td className="p-2 align-top text-right font-bold text-blue-700 bg-blue-50/30 rounded-bl-lg">
                     <div className="flex flex-col">
+                      <span className="text-[10px] text-slate-400 font-medium tracking-tight">
+                        Sub: {Number(row.total_value).toFixed(2)}
+                      </span>
                       <span>
                         {currency === "PEN" ? "S/" : "$"}{" "}
                         {rowTotalWithTax.toFixed(2)}
                       </span>
                     </div>
                   </td>
-
-                  <td className="p-3 text-center">
+                  <td className="p-2 align-middle text-center rounded-br-lg">
                     <button
                       type="button"
                       onClick={() => removeRow(index)}
@@ -781,7 +856,7 @@ const EditPurchase = () => {
             })}
           </tbody>
         </table>
-        <div className="p-4 bg-slate-50 border-t">
+        <div className="p-4 bg-slate-50 border-t rounded-b-lg">
           <button
             type="button"
             onClick={addRow}
@@ -793,9 +868,13 @@ const EditPurchase = () => {
       </div>
 
       {/* TOTALES + IMPUESTOS EXTRA */}
-      <div className="flex justify-end">
+      {/* ✅ CORRECCIÓN 2: items-start para que el panel izquierdo no se estire hacia abajo si no hay alertas */}
+      <div className="flex flex-col md:flex-row justify-between items-start gap-6">
+        {/* ZONA DE ALERTAS (IZQUIERDA) */}
+        <div className="w-full md:flex-1">{renderBudgetAlerts()}</div>
+
+        {/* ZONA DE TOTALES (DERECHA) */}
         <div className="w-full md:w-[450px] bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
-          {/* 1. Totales Básicos */}
           <div className="space-y-2 mb-4 text-sm text-slate-600">
             <div className="flex justify-between">
               <span>Subtotal:</span>
@@ -817,7 +896,6 @@ const EditPurchase = () => {
             </div>
           </div>
 
-          {/* 2. SELECTOR DE IMPUESTO EXTRA */}
           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
             <p className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-1">
               <Calculator size={14} /> Impuestos Adicionales
@@ -842,7 +920,7 @@ const EditPurchase = () => {
                   onChange={() => {
                     setExtraTaxType("PERCEPTION");
                     setExtraTaxRate(0);
-                    setExtraTaxAmount("0"); // Reiniciar a 0 string
+                    setExtraTaxAmount("0");
                   }}
                 />
                 <span className="text-purple-700 font-bold">Percepción</span>
@@ -874,7 +952,6 @@ const EditPurchase = () => {
                 <span className="text-blue-700 font-bold">Detracción</span>
               </label>
             </div>
-
             {extraTaxType !== "NONE" && (
               <div className="mt-4 pt-3 border-t border-slate-200 animate-in slide-in-from-top-2">
                 <div className="flex justify-between items-center">
@@ -883,9 +960,7 @@ const EditPurchase = () => {
                       ? "Monto Fijo:"
                       : `Porcentaje (${extraTaxType === "RETENTION" ? "Retención" : "Detracción"}):`}
                   </span>
-
                   <div className="flex items-center gap-2">
-                    {/* Input de Porcentaje */}
                     {extraTaxType !== "PERCEPTION" && (
                       <div className="relative">
                         <input
@@ -902,7 +977,6 @@ const EditPurchase = () => {
                       </div>
                     )}
                     <span className="text-slate-400">=</span>
-                    {/* Input de Monto */}
                     <div className="relative">
                       <span className="absolute left-2 top-1.5 text-xs text-slate-500">
                         {currency === "PEN" ? "S/" : "$"}
@@ -921,18 +995,10 @@ const EditPurchase = () => {
                     </div>
                   </div>
                 </div>
-                {extraTaxType !== "PERCEPTION" && (
-                  <p className="text-[10px] text-slate-400 text-right mt-1 italic">
-                    * Calculado sobre el Total (
-                    {currency === "PEN" ? "S/" : "$"} {totalDocument.toFixed(2)}
-                    )
-                  </p>
-                )}
               </div>
             )}
           </div>
 
-          {/* 3. TOTAL FINAL NETO */}
           <div className="flex justify-between pt-4 border-t-2 border-slate-800">
             <span className="font-black text-xl text-slate-900">
               TOTAL NETO:
@@ -941,8 +1007,6 @@ const EditPurchase = () => {
               <div className="font-black text-2xl text-blue-600">
                 {currency === "PEN" ? "S/" : "$"} {totalNetPay.toFixed(2)}
               </div>
-
-              {/* 👇 TOTAL FANTASMA EN SOLES (SI ES DÓLARES) */}
               {currency === "USD" && (
                 <div className="text-sm font-medium text-slate-400 mt-1">
                   (Contable: S/{" "}
@@ -952,7 +1016,6 @@ const EditPurchase = () => {
             </div>
           </div>
 
-          {/* SALDO A FAVOR */}
           {supplierBalance > 0 && header.payment_status === "PAID" && (
             <div className="mt-4 p-3 bg-green-100 text-green-800 rounded border border-green-300 text-xs flex flex-col gap-1 animate-in slide-in-from-bottom-2">
               <div className="flex items-center gap-2 font-bold">

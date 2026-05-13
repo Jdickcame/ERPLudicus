@@ -522,7 +522,7 @@ const PointOfSale = () => {
             <div className="px-4 py-2.5 border-b border-slate-100 bg-yellow-50/30">
               <input
                 type="text"
-                placeholder="✍️ Nota opcional (Ej. Mesa 34, Cortesía staff...)"
+                placeholder="✍️ Nota "
                 className="w-full bg-transparent text-xs font-medium text-slate-600 outline-none placeholder:text-slate-400"
                 value={saleNote}
                 onChange={(e) => setSaleNote(e.target.value)}

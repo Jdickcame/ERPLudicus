@@ -7,6 +7,8 @@ from .models import (
     ExpenseCategory,
     Purchase,
     PurchaseDetail,
+    PurchaseNote,
+    PurchaseNoteDetail,
     Supplier,
     SupplierTransaction,
 )
@@ -44,6 +46,9 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
     product_name = serializers.SerializerMethodField()
     product_sku = serializers.SerializerMethodField()
 
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    area_name = serializers.CharField(source="area.name", read_only=True)
+
     # 👇 ESTA ES LA LÍNEA MÁGICA QUE TE FALTA
     # Permite que el producto sea opcional (para gastos como pintura/luz)
     product = serializers.PrimaryKeyRelatedField(
@@ -55,6 +60,8 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
     unit_value = serializers.DecimalField(max_digits=12, decimal_places=2)
     total_value = serializers.DecimalField(max_digits=12, decimal_places=2)
 
+    remaining_quantity = serializers.SerializerMethodField()
+
     class Meta:
         model = PurchaseDetail
         fields = [
@@ -62,11 +69,16 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
             "product",  # Django buscará la definición explícita de arriba
             "product_name",
             "product_sku",
+            "category",  # 👈 NUEVO
+            "category_name",  # 👈 NUEVO
+            "area",  # 👈 NUEVO
+            "area_name",  # 👈 NUEVO
             "description",
             "quantity",
             "unit_value",
             "total_value",
             "tax_percentage",
+            "remaining_quantity",
         ]
 
     def get_product_name(self, obj):
@@ -74,6 +86,25 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
 
     def get_product_sku(self, obj):
         return obj.product.sku if obj.product else None
+
+    def get_remaining_quantity(self, obj):
+        from django.db.models import Sum
+
+        from .models import PurchaseNoteDetail
+
+        # Sumamos todas las cantidades que ya se devolvieron en Notas de Crédito ('07')
+        returned = (
+            PurchaseNoteDetail.objects.filter(
+                note__purchase=obj.purchase,
+                note__note_type="07",
+                product=obj.product,
+                description=obj.description,  # Filtro extra por si es un gasto sin producto
+            ).aggregate(total=Sum("quantity"))["total"]
+            or 0
+        )
+
+        # Retornamos la resta (Lo que compraste menos lo que ya devolviste)
+        return float(obj.quantity) - float(returned)
 
 
 # --- 4. Compra (Cabecera) ---
@@ -86,9 +117,6 @@ class PurchaseSerializer(serializers.ModelSerializer):
     supplier_balance = serializers.DecimalField(
         source="supplier.balance", max_digits=12, decimal_places=2, read_only=True
     )
-
-    # ✅ ESTA LÍNEA FALTABA: Le decimos a Django de dónde sacar el nombre de la categoría
-    category_name = serializers.CharField(source="category.name", read_only=True)
 
     branch_id = serializers.IntegerField(write_only=True)
 
@@ -131,9 +159,6 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "budget_period",
             "due_date",  # Nuevo
             "registration_date",
-            "category",
-            "category_name",  # Ahora sí funcionará
-            "area",  # Nuevo
             "specific_concept",
             "currency",
             "exchange_rate",
@@ -227,3 +252,92 @@ class SupplierTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupplierTransaction
         fields = "__all__"
+
+
+# --- 5. Detalle de Nota de Compra (Crédito/Débito) ---
+class PurchaseNoteDetailSerializer(serializers.ModelSerializer):
+    product_name = serializers.SerializerMethodField()
+    product_sku = serializers.SerializerMethodField()
+
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    area_name = serializers.CharField(source="area.name", read_only=True)
+
+    product = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(), required=False, allow_null=True
+    )
+
+    quantity = serializers.DecimalField(max_digits=10, decimal_places=2)
+    unit_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        model = PurchaseNoteDetail
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_sku",
+            "category",  # 👈 NUEVO
+            "category_name",  # 👈 NUEVO
+            "area",  # 👈 NUEVO
+            "area_name",  # 👈 NUEVO
+            "description",
+            "quantity",
+            "unit_value",
+            "total_value",
+            "tax_percentage",
+        ]
+
+    def get_product_name(self, obj):
+        return obj.product.name if obj.product else None
+
+    def get_product_sku(self, obj):
+        return obj.product.sku if obj.product else None
+
+
+# --- 6. Nota de Compra (Cabecera) ---
+class PurchaseNoteSerializer(serializers.ModelSerializer):
+    details = PurchaseNoteDetailSerializer(many=True)
+
+    # Datos informativos de la compra original
+    purchase_series = serializers.CharField(source="purchase.series", read_only=True)
+    purchase_number = serializers.CharField(source="purchase.number", read_only=True)
+    supplier_name = serializers.CharField(
+        source="purchase.supplier.name", read_only=True
+    )
+
+    class Meta:
+        model = PurchaseNote
+        fields = [
+            "id",
+            "purchase",
+            "purchase_series",
+            "purchase_number",
+            "supplier_name",
+            "note_type",
+            "series",
+            "number",
+            "issue_date",
+            "reason",
+            "affects_inventory",
+            "currency",
+            "exchange_rate",
+            "subtotal",
+            "tax_amount",
+            "total",
+            "total_amount_pen",
+            "details",
+        ]
+        read_only_fields = ["user", "created_at", "total_amount_pen"]
+
+    def create(self, validated_data):
+        details_data = validated_data.pop("details")
+
+        with transaction.atomic():
+            # Le pasamos directamente **validated_data (que ya incluye al user de forma limpia)
+            note = PurchaseNote.objects.create(**validated_data)
+
+            for detail in details_data:
+                PurchaseNoteDetail.objects.create(note=note, **detail)
+
+        return note

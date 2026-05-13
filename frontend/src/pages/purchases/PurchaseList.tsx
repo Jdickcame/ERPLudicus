@@ -3,12 +3,15 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  CreditCard,
   Download,
   Edit,
   Eye,
+  FileText,
   Filter,
   Loader2,
   Plus,
+  RefreshCcw,
   Search,
   Trash2,
 } from "lucide-react";
@@ -19,7 +22,6 @@ import BranchSelector from "../../components/common/BranchSelector";
 import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal";
 import { useBranch } from "../../context/BranchContext";
 
-// Hook simple para "Debounce"
 function useDebounce(value: string, delay: number) {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => {
@@ -32,6 +34,9 @@ function useDebounce(value: string, delay: number) {
 const PurchaseList = () => {
   const { currentBranch } = useBranch();
   const navigate = useNavigate();
+
+  // ESTADO PARA LAS PESTAÑAS (COMPRAS vs NOTAS)
+  const [viewType, setViewType] = useState<"PURCHASES" | "NOTES">("PURCHASES");
 
   // --- ESTADOS DE DATOS ---
   const [purchases, setPurchases] = useState<any[]>([]);
@@ -49,12 +54,13 @@ const PurchaseList = () => {
   const pageSize = 10;
   const [ordering, setOrdering] = useState("-issue_date");
 
-  // Modal
-  const [selectedPurchaseId, setSelectedPurchaseId] = useState<number | null>(
-    null,
-  );
+  // Estado único y unificado para el Modal
+  const [selectedItem, setSelectedItem] = useState<{
+    id: number;
+    type: "PURCHASES" | "NOTES";
+  } | null>(null);
 
-  // --- FUNCIÓN DE CARGA ---
+  // --- FUNCIÓN DE CARGA DINÁMICA ---
   const fetchPurchases = useCallback(async () => {
     if (!currentBranch) return;
     setLoading(true);
@@ -69,14 +75,24 @@ const PurchaseList = () => {
 
       if (debouncedSearch) params.search = debouncedSearch;
       if (currencyFilter !== "ALL") params.currency = currencyFilter;
-      if (costTypeFilter !== "ALL") params.cost_type = costTypeFilter;
 
-      const response = await api.get("/purchases/purchases/", { params });
+      // El filtro de costo no aplica a las notas
+      if (viewType === "PURCHASES" && costTypeFilter !== "ALL") {
+        params.cost_type = costTypeFilter;
+      }
 
-      setPurchases(response.data.results || []);
-      setTotalCount(response.data.count || 0);
+      const endpoint =
+        viewType === "PURCHASES"
+          ? "/purchases/purchases/"
+          : "/purchases/notes/";
+
+      const response = await api.get(endpoint, { params });
+
+      const data = response.data.results || response.data;
+      setPurchases(Array.isArray(data) ? data : []);
+      setTotalCount(response.data.count || data.length || 0);
     } catch (error) {
-      console.error("Error cargando compras:", error);
+      console.error("Error cargando registros:", error);
     } finally {
       setLoading(false);
     }
@@ -87,6 +103,7 @@ const PurchaseList = () => {
     currencyFilter,
     costTypeFilter,
     ordering,
+    viewType,
   ]);
 
   useEffect(() => {
@@ -95,7 +112,13 @@ const PurchaseList = () => {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, currencyFilter, costTypeFilter, currentBranch]);
+  }, [
+    debouncedSearch,
+    currencyFilter,
+    costTypeFilter,
+    currentBranch,
+    viewType,
+  ]);
 
   // --- MANEJADORES ---
   const handleSort = (field: string) => {
@@ -112,16 +135,26 @@ const PurchaseList = () => {
   };
 
   const handleDelete = async (id: number) => {
-    if (!window.confirm("¿Eliminar compra? Esto revertirá el stock.")) return;
+    if (
+      !window.confirm(
+        `¿Eliminar ${
+          viewType === "NOTES" ? "Nota" : "Compra"
+        }? Esto revertirá los movimientos de stock y saldos.`,
+      )
+    )
+      return;
     try {
-      await api.delete(`/purchases/purchases/${id}/`);
+      const endpoint =
+        viewType === "PURCHASES"
+          ? `/purchases/purchases/${id}/`
+          : `/purchases/notes/${id}/`;
+      await api.delete(endpoint);
       fetchPurchases();
     } catch (error) {
-      alert("Error al eliminar");
+      alert("Error al eliminar el documento.");
     }
   };
 
-  // 👇 NUEVA FUNCIÓN PARA EXPORTAR EXCEL
   const handleExportExcel = async () => {
     if (!currentBranch) return;
     try {
@@ -130,13 +163,11 @@ const PurchaseList = () => {
       if (currencyFilter !== "ALL") params.currency = currencyFilter;
       if (costTypeFilter !== "ALL") params.cost_type = costTypeFilter;
 
-      // Pedimos el archivo como Blob
       const response = await api.get("/purchases/purchases/export_excel/", {
         params,
         responseType: "blob",
       });
 
-      // Forzamos la descarga en el navegador
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
       link.href = url;
@@ -151,6 +182,19 @@ const PurchaseList = () => {
   };
 
   const totalPages = Math.ceil(totalCount / pageSize);
+
+  const getPaymentMethodLabel = (method: string) => {
+    const methods: Record<string, string> = {
+      CASH: "Efectivo",
+      TRANSFER: "Transfer",
+      CARD: "Tarjeta",
+      YAPE: "Yape",
+      PLIN: "Plin",
+      CHECK: "Cheque",
+      OTHER: "Otro",
+    };
+    return methods[method] || method || "-";
+  };
 
   return (
     <div className="p-6 animate-in fade-in duration-500">
@@ -168,7 +212,6 @@ const PurchaseList = () => {
           </p>
         </div>
 
-        {/* 👇 BOTONES DE ACCIÓN */}
         <div className="flex gap-3">
           <button
             onClick={handleExportExcel}
@@ -180,9 +223,33 @@ const PurchaseList = () => {
             to="/purchases/new"
             className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-700 transition shadow-md font-medium"
           >
-            <Plus size={18} /> Nueva Compra
+            <Plus size={18} /> Nuevo Registro
           </Link>
         </div>
+      </div>
+
+      {/* PESTAÑAS DE NAVEGACIÓN */}
+      <div className="flex border-b border-slate-200 mb-6">
+        <button
+          onClick={() => setViewType("PURCHASES")}
+          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${
+            viewType === "PURCHASES"
+              ? "border-blue-600 text-blue-600 bg-blue-50/50"
+              : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50"
+          }`}
+        >
+          <FileText size={18} /> Facturas y Boletas
+        </button>
+        <button
+          onClick={() => setViewType("NOTES")}
+          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${
+            viewType === "NOTES"
+              ? "border-orange-500 text-orange-600 bg-orange-50/50"
+              : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50"
+          }`}
+        >
+          <RefreshCcw size={18} /> Notas de Crédito / Débito
+        </button>
       </div>
 
       {/* BARRA DE FILTROS */}
@@ -212,9 +279,10 @@ const PurchaseList = () => {
         <div className="relative">
           <Filter className="absolute left-3 top-3 text-slate-400" size={18} />
           <select
-            className="w-full pl-10 pr-4 py-2 border rounded-lg focus:outline-none focus:border-blue-500 bg-white text-slate-700 appearance-none cursor-pointer"
+            className="w-full pl-10 pr-4 py-2 border rounded-lg focus:outline-none focus:border-blue-500 bg-white text-slate-700 appearance-none cursor-pointer disabled:opacity-50 disabled:bg-slate-100"
             value={costTypeFilter}
             onChange={(e) => setCostTypeFilter(e.target.value)}
+            disabled={viewType === "NOTES"}
           >
             <option value="ALL">Todos los Costos</option>
             <option value="CV">Variable (CV)</option>
@@ -247,11 +315,22 @@ const PurchaseList = () => {
                   onClick={() => handleSort("supplier__name")}
                 >
                   <div className="flex items-center">
-                    Proveedor / RUC {getSortIcon("supplier__name")}
+                    Proveedor {getSortIcon("supplier__name")}
                   </div>
                 </th>
 
-                {/* 👇 NUEVAS COLUMNAS FINANCIERAS */}
+                {viewType === "PURCHASES" && (
+                  <th
+                    className="px-4 py-3 cursor-pointer hover:bg-slate-100 whitespace-nowrap"
+                    onClick={() => handleSort("payment_method")}
+                  >
+                    <div className="flex items-center">
+                      M. Pago {getSortIcon("payment_method")}
+                    </div>
+                  </th>
+                )}
+
+                {/* 👇 COLUMNAS DE DESGLOSE DE IMPUESTOS RESTAURADAS */}
                 <th className="px-3 py-3 text-right">V. Venta</th>
                 <th className="px-3 py-3 text-right">Gravado</th>
                 <th className="px-3 py-3 text-right">No Grav.</th>
@@ -280,102 +359,143 @@ const PurchaseList = () => {
               {purchases.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     className="text-center py-10 text-slate-400 text-sm"
                   >
                     No se encontraron registros.
                   </td>
                 </tr>
               ) : (
-                purchases.map((purchase) => (
-                  <tr
-                    key={purchase.id}
-                    className="bg-white border-b hover:bg-slate-50 transition"
-                  >
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      {purchase.issue_date}
-                    </td>
-                    <td className="px-4 py-3 font-medium text-slate-900 whitespace-nowrap">
-                      {purchase.document_type} <br />
-                      <span className="text-slate-500 font-normal">
-                        {purchase.series}-{purchase.number}
-                      </span>
-                    </td>
-                    <td
-                      className="px-4 py-3 truncate max-w-[180px]"
-                      title={purchase.supplier_name}
+                purchases.map((purchase) => {
+                  const docName =
+                    viewType === "NOTES"
+                      ? purchase.note_type === "07"
+                        ? "NOTA DE CRÉDITO"
+                        : "NOTA DE DÉBITO"
+                      : purchase.document_type;
+
+                  const totalColor =
+                    viewType === "NOTES" && purchase.note_type === "07"
+                      ? "text-orange-600"
+                      : purchase.currency === "USD"
+                        ? "text-emerald-600"
+                        : "text-blue-600";
+
+                  return (
+                    <tr
+                      key={purchase.id}
+                      className="bg-white border-b hover:bg-slate-50 transition"
                     >
-                      <div className="font-semibold text-slate-800 truncate">
-                        {purchase.supplier_name}
-                      </div>
-                      <div className="text-slate-400">
-                        RUC: {purchase.supplier_tax_id}
-                      </div>
-                    </td>
-
-                    {/* 👇 DATOS FINANCIEROS */}
-                    <td className="px-3 py-3 text-right text-slate-600">
-                      {/* Usamos 'subtotal' que es como viene del backend */}
-                      {Number(purchase.subtotal || 0).toFixed(2)}
-                    </td>
-                    <td className="px-3 py-3 text-right text-slate-600">
-                      {Number(purchase.gravado || 0).toFixed(2)}
-                    </td>
-                    <td className="px-3 py-3 text-right text-slate-600">
-                      {Number(purchase.no_gravado || 0).toFixed(2)}
-                    </td>
-                    <td className="px-3 py-3 text-right text-slate-600">
-                      {/* Usamos 'tax_amount' que es el nombre real del IGV en tu BD */}
-                      {Number(purchase.tax_amount || 0).toFixed(2)}
-                    </td>
-
-                    <td
-                      className={`px-4 py-3 text-right font-bold whitespace-nowrap ${purchase.currency === "USD" ? "text-emerald-600" : "text-blue-600"}`}
-                    >
-                      {purchase.currency === "USD" ? "$ " : "S/ "}
-                      {Number(purchase.total).toFixed(2)}
-                    </td>
-
-                    <td className="px-4 py-3 text-center">
-                      <span
-                        className={`px-2 py-1 rounded-full text-[10px] font-bold ${
-                          purchase.payment_status === "PAID"
-                            ? "bg-green-100 text-green-700"
-                            : "bg-red-100 text-red-700"
-                        }`}
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {purchase.issue_date}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-900 whitespace-nowrap">
+                        {docName} <br />
+                        <span className="text-slate-500 font-normal">
+                          {purchase.series}-{purchase.number}
+                        </span>
+                      </td>
+                      <td
+                        className="px-4 py-3 truncate max-w-[180px]"
+                        title={purchase.supplier_name}
                       >
-                        {purchase.payment_status === "PAID"
-                          ? "PAGADO"
-                          : "PENDIENTE"}
-                      </span>
-                    </td>
+                        <div className="font-semibold text-slate-800 truncate">
+                          {purchase.supplier_name}
+                        </div>
+                        {viewType === "PURCHASES" && (
+                          <div className="text-slate-400">
+                            RUC: {purchase.supplier_tax_id}
+                          </div>
+                        )}
+                      </td>
 
-                    <td className="px-4 py-3 text-center">
-                      <div className="flex items-center justify-center gap-1">
-                        <button
-                          onClick={() => setSelectedPurchaseId(purchase.id)}
-                          className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-full transition"
-                        >
-                          <Eye size={16} />
-                        </button>
-                        <button
-                          onClick={() =>
-                            navigate(`/purchases/edit/${purchase.id}`)
-                          }
-                          className="text-slate-500 hover:text-orange-500 p-1.5 rounded-full transition"
-                        >
-                          <Edit size={16} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(purchase.id)}
-                          className="text-slate-500 hover:text-red-500 p-1.5 rounded-full transition"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      {viewType === "PURCHASES" && (
+                        <td className="px-4 py-3 whitespace-nowrap text-slate-600">
+                          <span className="flex items-center gap-1.5 bg-slate-100 px-2 py-1 rounded w-fit">
+                            <CreditCard size={12} className="text-slate-400" />
+                            {getPaymentMethodLabel(purchase.payment_method)}
+                          </span>
+                        </td>
+                      )}
+
+                      {/* 👇 VALORES DE LAS COLUMNAS RESTAURADAS */}
+                      <td className="px-3 py-3 text-right text-slate-600">
+                        {Number(purchase.subtotal || 0).toFixed(2)}
+                      </td>
+                      <td className="px-3 py-3 text-right text-slate-600">
+                        {Number(purchase.gravado || 0).toFixed(2)}
+                      </td>
+                      <td className="px-3 py-3 text-right text-slate-600">
+                        {Number(purchase.no_gravado || 0).toFixed(2)}
+                      </td>
+                      <td className="px-3 py-3 text-right text-slate-600">
+                        {Number(purchase.tax_amount || 0).toFixed(2)}
+                      </td>
+
+                      <td
+                        className={`px-4 py-3 text-right font-bold whitespace-nowrap ${totalColor}`}
+                      >
+                        {purchase.currency === "USD" ? "$ " : "S/ "}
+                        {Number(
+                          purchase.total || purchase.total_net_pay || 0,
+                        ).toFixed(2)}
+                      </td>
+
+                      <td className="px-4 py-3 text-center">
+                        {viewType === "NOTES" ? (
+                          <span className="px-2 py-1 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">
+                            APLICADA
+                          </span>
+                        ) : (
+                          <span
+                            className={`px-2 py-1 rounded-full text-[10px] font-bold ${purchase.payment_status === "PAID" ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}
+                          >
+                            {purchase.payment_status === "PAID"
+                              ? "PAGADO"
+                              : "PENDIENTE"}
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="px-4 py-3 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            onClick={() =>
+                              setSelectedItem({
+                                id: purchase.id,
+                                type: viewType,
+                              })
+                            }
+                            className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-full transition"
+                            title="Ver Detalle"
+                          >
+                            <Eye size={16} />
+                          </button>
+
+                          {viewType === "PURCHASES" && (
+                            <button
+                              onClick={() =>
+                                navigate(`/purchases/edit/${purchase.id}`)
+                              }
+                              className="text-slate-500 hover:text-orange-500 p-1.5 rounded-full transition"
+                              title="Editar"
+                            >
+                              <Edit size={16} />
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => handleDelete(purchase.id)}
+                            className="text-slate-500 hover:text-red-500 p-1.5 rounded-full transition"
+                            title="Eliminar"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -406,10 +526,12 @@ const PurchaseList = () => {
         </div>
       </div>
 
-      {selectedPurchaseId && (
+      {/* MODAL */}
+      {selectedItem && (
         <PurchaseDetailModal
-          purchaseId={selectedPurchaseId}
-          onClose={() => setSelectedPurchaseId(null)}
+          purchaseId={selectedItem.id}
+          type={selectedItem.type}
+          onClose={() => setSelectedItem(null)}
         />
       )}
     </div>

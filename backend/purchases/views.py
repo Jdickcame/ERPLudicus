@@ -4,7 +4,7 @@ from decimal import Decimal
 import openpyxl
 from core.mixins import BranchAccessMixin
 from django.db import transaction
-from django.db.models import Count, Min, Sum
+from django.db.models import Count, ExpressionWrapper, F, FloatField, Min, Sum
 from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
 from inventory.models import Kardex, Stock
@@ -22,12 +22,15 @@ from .models import (
     AreaMonthlyLimit,
     ExpenseCategory,
     Purchase,
+    PurchaseDetail,
+    PurchaseNote,
     Supplier,
     SupplierTransaction,
 )
 from .serializers import (
     AreaBudgetSerializer,
     ExpenseCategorySerializer,
+    PurchaseNoteSerializer,
     PurchaseSerializer,
     SupplierSerializer,
 )
@@ -100,14 +103,27 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
             extra_budget = float(adjustment_obj.amount) if adjustment_obj else 0.00
 
             # C. CALCULAR TOTALES
-            monthly_purchases = Purchase.objects.filter(
-                branch_id=branch_id,
-                area=budget,
-                budget_period__year=target_year,
-                budget_period__month=target_month,
+            monthly_details = PurchaseDetail.objects.filter(
+                purchase__branch_id=branch_id,
+                area=budget,  # Filtramos por el área en el detalle
+                purchase__budget_period__year=target_year,
+                purchase__budget_period__month=target_month,
+                # Evitamos sumar compras anuladas si existen
+                purchase__payment_status__in=["PAID", "PENDING"],
             )
 
-            spent = monthly_purchases.aggregate(s=Sum("total_net_pay"))["s"] or 0
+            # Sumamos total_value + IGV de cada línea
+            cost_with_tax = ExpressionWrapper(
+                F("total_value") * (1.0 + F("tax_percentage") / 100.0),
+                output_field=FloatField(),
+            )
+
+            spent = (
+                monthly_details.annotate(line_cost=cost_with_tax).aggregate(
+                    s=Sum("line_cost")
+                )["s"]
+                or 0
+            )
 
             final_limit = base_limit + extra_budget
             spent = float(spent)
@@ -422,7 +438,7 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
     filterset_fields = {
         "branch": ["exact"],
-        "area": ["exact"],
+        "details__area": ["exact"],
         "budget_period": ["year", "month", "exact"],
         "payment_status": ["exact"],
         "supplier": ["exact"],
@@ -795,3 +811,113 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         wb.save(response)
 
         return response
+
+
+# --- 5. VIEWSET DE NOTAS DE COMPRA (CRÉDITO / DÉBITO) ---
+class PurchaseNoteViewSet(viewsets.ModelViewSet):
+    serializer_class = PurchaseNoteSerializer  # <-- Este lo crearemos enseguida
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = PurchaseNote.objects.select_related(
+            "purchase", "purchase__supplier"
+        ).all()
+        # Puedes agregar filtros por proveedor, fecha o sucursal aquí si lo necesitas
+        return queryset
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            # 1. Guardamos la Nota
+            note = serializer.save(user=self.request.user)
+            purchase = note.purchase
+            supplier = purchase.supplier
+
+            # 2. IMPACTO FINANCIERO (Cuentas por Pagar)
+            # - Nota Crédito (07): Reduce la deuda (Monto a favor nuestro)
+            # - Nota Débito (08): Aumenta la deuda (Le debemos más al proveedor)
+            if note.note_type == "07":
+                supplier.balance -= (
+                    note.total_net_pay
+                    if hasattr(note, "total_net_pay")
+                    else note.total_amount_pen
+                )
+            elif note.note_type == "08":
+                supplier.balance += (
+                    note.total_net_pay
+                    if hasattr(note, "total_net_pay")
+                    else note.total_amount_pen
+                )
+
+            supplier.save()
+
+            # 3. IMPACTO EN INVENTARIO (Solo si affects_inventory es True)
+            if note.affects_inventory:
+                for detail in note.details.all():
+                    if not detail.product or detail.product.product_type not in [
+                        "STOCKED",
+                        "CONSUMABLE",
+                    ]:
+                        continue
+
+                    stock_record, _ = Stock.objects.get_or_create(
+                        branch=purchase.branch,
+                        product=detail.product,
+                        defaults={"quantity": 0, "average_cost": 0},
+                    )
+
+                    # A. Lógica para Nota de Crédito (DEVOLUCIÓN: Sale mercadería del almacén)
+                    if note.note_type == "07":
+                        # Restamos la cantidad
+                        stock_record.quantity -= detail.quantity
+                        stock_record.save()
+
+                        # Movimiento de Kardex (Salida por Devolución a Proveedor)
+                        Kardex.objects.create(
+                            branch=purchase.branch,
+                            product=detail.product,
+                            date=note.issue_date,
+                            type="OUT_RETURN",  # Un tipo que podrías tener en tu Kardex para devoluciones
+                            quantity=-detail.quantity,  # Negativo porque sale
+                            unit_cost=detail.unit_value,
+                            total_cost=detail.quantity * detail.unit_value,
+                            balance_quantity=stock_record.quantity,
+                            balance_unit_cost=stock_record.average_cost,
+                            balance_total_cost=stock_record.quantity
+                            * stock_record.average_cost,
+                            user=self.request.user,
+                            description=f"NC {note.series}-{note.number} | Dev. a Proveedor (Ref: {purchase.series}-{purchase.number})",
+                        )
+
+                    # B. Lógica para Nota de Débito (INGRESO EXTRA: Entra mercadería olvidada/extra)
+                    elif note.note_type == "08":
+                        # Sumamos la cantidad y recalculamos costo promedio (igual que una compra normal)
+                        old_total = stock_record.quantity * stock_record.average_cost
+                        new_total = detail.quantity * detail.unit_value
+                        total_qty = stock_record.quantity + detail.quantity
+
+                        new_avg = (
+                            (old_total + new_total) / total_qty
+                            if total_qty > 0
+                            else detail.unit_value
+                        )
+
+                        stock_record.quantity = total_qty
+                        stock_record.average_cost = new_avg
+                        stock_record.save()
+
+                        # Movimiento de Kardex (Ingreso extra)
+                        Kardex.objects.create(
+                            branch=purchase.branch,
+                            product=detail.product,
+                            date=note.issue_date,
+                            type="IN_PURCHASE",
+                            quantity=detail.quantity,
+                            unit_cost=detail.unit_value,
+                            total_cost=new_total,
+                            balance_quantity=stock_record.quantity,
+                            balance_unit_cost=stock_record.average_cost,
+                            balance_total_cost=stock_record.quantity
+                            * stock_record.average_cost,
+                            user=self.request.user,
+                            description=f"ND {note.series}-{note.number} | Ingreso Adicional (Ref: {purchase.series}-{purchase.number})",
+                        )

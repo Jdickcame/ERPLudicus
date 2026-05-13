@@ -132,15 +132,6 @@ class Purchase(models.Model):
     )
 
     # Clasificación
-    category = models.ForeignKey(ExpenseCategory, on_delete=models.PROTECT)
-    area = models.ForeignKey(
-        Area,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="purchases",
-        verbose_name="Área",
-    )
     specific_concept = models.CharField(max_length=200, blank=True, null=True)
 
     # Montos
@@ -219,6 +210,11 @@ class PurchaseDetail(models.Model):
         "inventory.Product", on_delete=models.PROTECT, null=True, blank=True
     )
 
+    category = models.ForeignKey(
+        "ExpenseCategory", on_delete=models.PROTECT, null=True, blank=True
+    )
+    area = models.ForeignKey("Area", on_delete=models.PROTECT, null=True, blank=True)
+
     description = models.CharField(max_length=255)
     quantity = models.DecimalField(max_digits=10, decimal_places=2)
     unit_value = models.DecimalField(max_digits=12, decimal_places=2)
@@ -265,3 +261,77 @@ class AreaMonthlyLimit(models.Model):
 
     def __str__(self):
         return f"Límite {self.area.name} {self.month}/{self.year}: {self.amount}"
+
+
+# --- 7. NOTAS DE COMPRA (CRÉDITO / DÉBITO) ---
+class PurchaseNote(models.Model):
+    NOTE_TYPES = (
+        ("07", "Nota de Crédito"),
+        ("08", "Nota de Débito"),
+    )
+
+    purchase = models.ForeignKey(
+        Purchase, on_delete=models.PROTECT, related_name="notes"
+    )
+    note_type = models.CharField(max_length=2, choices=NOTE_TYPES, default="07")
+    series = models.CharField(max_length=20)
+    number = models.CharField(max_length=20)
+    issue_date = models.DateField(default=timezone.now)
+    reason = models.CharField(max_length=255, default="Devolución / Descuento")
+
+    # 🔥 CLAVE: ¿Es devolución física o solo un ajuste de dinero?
+    affects_inventory = models.BooleanField(
+        default=True,
+        help_text="Marcar si esta nota implica devolver o ingresar productos físicos al almacén.",
+    )
+
+    # Montos
+    currency = models.CharField(
+        max_length=3, choices=Purchase.CURRENCY_CHOICES, default="PEN"
+    )
+    exchange_rate = models.DecimalField(max_digits=6, decimal_places=3, default=1.000)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_amount_pen = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0.00
+    )
+
+    # Auditoría
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        # Lógica de Conversión de Moneda igual que en la compra principal
+        if self.currency == "PEN":
+            self.exchange_rate = Decimal("1.000")
+            self.total_amount_pen = self.total
+        else:
+            self.total_amount_pen = self.total * Decimal(str(self.exchange_rate))
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        tipo = "NC" if self.note_type == "07" else "ND"
+        return f"{tipo} {self.series}-{self.number} (Ref: {self.purchase.series}-{self.purchase.number})"
+
+
+class PurchaseNoteDetail(models.Model):
+    note = models.ForeignKey(
+        PurchaseNote, related_name="details", on_delete=models.CASCADE
+    )
+    product = models.ForeignKey(
+        "inventory.Product", on_delete=models.PROTECT, null=True, blank=True
+    )
+    category = models.ForeignKey(
+        "ExpenseCategory", on_delete=models.PROTECT, null=True, blank=True
+    )
+    area = models.ForeignKey("Area", on_delete=models.PROTECT, null=True, blank=True)
+
+    description = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    unit_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_value = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=18.00)
+
+    def __str__(self):
+        return f"{self.quantity} x {self.description} (Nota {self.note.id})"
