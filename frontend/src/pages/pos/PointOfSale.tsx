@@ -1,12 +1,12 @@
 import {
-    CheckCircle,
-    Minus,
-    Plus,
-    Printer,
-    Search,
-    ShoppingCart,
-    Trash2,
-    X,
+  CheckCircle,
+  Minus,
+  Plus,
+  Printer,
+  Search,
+  ShoppingCart,
+  Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 // 👇 1. Fix the api and context imports (might need to go up one more level depending on your structure)
@@ -16,6 +16,7 @@ import { useBranch } from "../../context/BranchContext";
 import PaymentModal from "./components/PaymentModal";
 // 👇 3. Import the new PosHeader
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../context/AuthContext";
 import PosHeader from "./components/PosHeader";
 
 // ... (Interfaces Product, Customer, CartItem remain exactly the same) ...
@@ -45,6 +46,13 @@ const PointOfSale = () => {
   // 👈 Renamed component
   const { currentBranch } = useBranch();
 
+  // 👇 NUEVO: Sacamos al usuario logueado
+  const { user } = useAuth();
+
+  // 👇 NUEVO: Creamos la misma validación que usaste en la Nota de Crédito
+  const isAdmin =
+    user?.role === "ADMIN" || user?.role === "MANAGER" || user?.is_superuser;
+
   // Estados
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -57,6 +65,8 @@ const PointOfSale = () => {
   const [lastSaleId, setLastSaleId] = useState<number | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+
+  const [saleNote, setSaleNote] = useState("");
 
   // Carga inicial
   const loadData = async () => {
@@ -167,13 +177,21 @@ const PointOfSale = () => {
         branch_id: currentBranch?.id,
         customer: selectedCustomerId,
         payments: paymentData.payments,
-        invoice_type_code: paymentData.invoice_type === "FACTURA" ? "01" : "03",
+        invoice_type_code:
+          paymentData.invoice_type === "TICKET"
+            ? "99"
+            : paymentData.invoice_type === "FACTURA"
+              ? "01"
+              : "03",
         total: totalToPay.toFixed(2),
+        notes: saleNote,
         details: cart.map((item) => ({
           product: item.product.id,
           quantity: item.quantity,
           price: item.price.toFixed(2),
         })),
+        is_courtesy: paymentData.is_courtesy || false,
+        supervisor_pin: paymentData.supervisor_pin || null,
       };
 
       const response = await api.post("/sales/sales/", payload);
@@ -184,12 +202,15 @@ const PointOfSale = () => {
       // Limpiamos el carrito y datos
       setCart([]);
       setSelectedCustomerId(null);
+      setSaleNote("");
       loadData();
 
       setShowSuccessModal(true);
     } catch (error: any) {
       console.error(error);
-      alert("❌ Error al procesar venta");
+      // 👇 Mejorar el error para que te muestre si el PIN falló en Django
+      const errorMsg = error.response?.data?.error || "Error al procesar venta";
+      alert(`❌ ${errorMsg}`);
     } finally {
       setIsLoading(false);
     }
@@ -272,6 +293,8 @@ const PointOfSale = () => {
         <PaymentModal
           total={totalToPay}
           selectedCustomer={selectedCustomer}
+          // 🔥 NUEVO: ¡Le pasamos el poder al modal!
+          isAdmin={isAdmin}
           onClose={() => setIsPaymentModalOpen(false)}
           onConfirm={handleProcessSale}
         />
@@ -372,161 +395,171 @@ const PointOfSale = () => {
           </div>
         </div>
 
-        {/* DERECHA: TICKET */}
-        <div className="w-full md:w-[420px] flex flex-col bg-white rounded-xl shadow-xl border border-slate-200 h-full relative">
-          <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl">
-            <div className="flex justify-between items-center mb-3">
-              <h2 className="font-black text-slate-700 text-lg flex items-center gap-2">
-                <ShoppingCart className="text-blue-600" /> Venta
+        {/* DERECHA: TICKET (CARRITO OPTIMIZADO) */}
+        <div className="w-full md:w-[400px] flex flex-col bg-white rounded-2xl shadow-xl border border-slate-200 h-full overflow-hidden">
+          {/* 1. CABECERA Y CLIENTE (Ultra Compacto) */}
+          <div className="p-4 border-b border-slate-100 bg-white z-10 shadow-sm flex flex-col gap-3">
+            <div className="flex justify-between items-center">
+              <h2 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                <ShoppingCart className="text-blue-600" size={20} /> Venta
               </h2>
               <span
-                className={`text-xs px-2 py-1 rounded font-bold border ${
+                className={`text-[10px] px-2 py-1 rounded font-black tracking-wider uppercase ${
                   invoiceType === "FACTURA"
-                    ? "bg-purple-100 text-purple-700 border-purple-200"
-                    : "bg-blue-100 text-blue-700 border-blue-200"
+                    ? "bg-purple-100 text-purple-700"
+                    : "bg-blue-100 text-blue-700"
                 }`}
               >
                 {invoiceType}
               </span>
             </div>
 
-            <div className="bg-white p-2 rounded-lg border border-slate-200 shadow-sm">
-              <div className="flex gap-2">
+            {!selectedCustomerId ? (
+              <div className="relative">
+                <Search
+                  className="absolute left-3 top-2.5 text-slate-400"
+                  size={16}
+                />
                 <input
                   type="text"
-                  placeholder="RUC o DNI Cliente..."
-                  className="flex-1 p-2 border border-slate-300 rounded-md font-bold text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 text-sm"
-                  maxLength={11}
-                  onKeyDown={async (e) => {
-                    if (e.key === "Enter") {
-                      const val = (e.target as HTMLInputElement).value;
-                      if (val.length >= 8) searchCustomer(val);
-                    }
-                  }}
                   id="client-search-input"
-                />
-                <button
-                  onClick={() => {
-                    const val = (
-                      document.getElementById(
-                        "client-search-input",
-                      ) as HTMLInputElement
-                    ).value;
-                    searchCustomer(val);
+                  placeholder="Agregar cliente (RUC/DNI)..."
+                  className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all placeholder:text-slate-400"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter")
+                      searchCustomer((e.target as HTMLInputElement).value);
                   }}
-                  className="bg-slate-800 text-white p-2 rounded-md hover:bg-black transition-colors"
-                  title="Buscar en SUNAT/RENIEC"
+                />
+              </div>
+            ) : (
+              <div className="bg-blue-50 border border-blue-100 p-2.5 rounded-lg flex justify-between items-center animate-in fade-in">
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-blue-800 truncate">
+                    {selectedCustomer?.name}
+                  </p>
+                  <p className="text-[10px] text-blue-600 font-mono">
+                    {selectedCustomer?.document_type}:{" "}
+                    {selectedCustomer?.tax_id}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setSelectedCustomerId(null)}
+                  className="text-blue-400 hover:text-red-500 shrink-0 ml-2 p-1 transition-colors"
                 >
-                  <Search size={18} />
+                  <X size={16} />
                 </button>
               </div>
-
-              {selectedCustomerId ? (
-                <div className="mt-2 bg-blue-50 border border-blue-100 p-2 rounded-md flex justify-between items-start animate-in fade-in">
-                  <div>
-                    <p className="text-xs font-bold text-blue-800 line-clamp-1">
-                      {selectedCustomer?.name}
-                    </p>
-                    <p className="text-[10px] text-blue-600 font-mono">
-                      {selectedCustomer?.document_type}:{" "}
-                      {selectedCustomer?.tax_id}
-                    </p>
-                    <p className="text-[10px] text-slate-400 truncate w-48">
-                      {selectedCustomer?.address || "Sin dirección"}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setSelectedCustomerId(null)}
-                    className="text-slate-400 hover:text-red-500"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              ) : (
-                <div className="mt-2 text-[10px] text-slate-400 text-center italic">
-                  Ingresa documento y presiona Enter para buscar en BD o SUNAT.
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50">
+          {/* 2. LISTA DE PRODUCTOS (Expande todo el espacio restante) */}
+          <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50 custom-scrollbar space-y-2">
             {cart.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-3">
-                <ShoppingCart size={40} className="opacity-20" />
-                <p className="text-sm font-medium">Carrito vacío</p>
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-2">
+                <ShoppingCart size={48} className="opacity-20 mb-2" />
+                <p className="text-sm font-bold text-slate-500">
+                  El carrito está vacío
+                </p>
+                <p className="text-xs text-center px-8 opacity-60">
+                  Agrega productos desde el catálogo a la izquierda.
+                </p>
               </div>
             ) : (
               cart.map((item, index) => (
                 <div
                   key={index}
-                  className="flex items-center justify-between p-3 bg-white border border-slate-200 rounded-lg shadow-sm"
+                  className="flex flex-col p-3 bg-white border border-slate-200 rounded-xl shadow-sm hover:shadow-md transition-shadow"
                 >
-                  <div className="flex-1 min-w-0 pr-2">
-                    <p className="font-bold text-sm text-slate-700 truncate">
+                  <div className="flex justify-between items-start mb-2">
+                    <p className="font-bold text-sm text-slate-700 leading-tight pr-2 line-clamp-2">
                       {item.product.name}
                     </p>
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
-                      <span>
-                        {item.quantity} x S/ {item.price.toFixed(2)}
-                      </span>
-                    </div>
+                    <button
+                      onClick={() => removeFromCart(index)}
+                      className="text-slate-300 hover:text-red-500 transition-colors"
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center bg-slate-100 rounded-lg border border-slate-200 p-0.5">
+
+                  <div className="flex justify-between items-end">
+                    {/* Controles de Cantidad */}
+                    <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-200">
                       <button
                         onClick={() => updateQuantity(index, -1)}
-                        className="p-1.5 hover:bg-white hover:text-red-500 rounded-md transition-colors text-slate-500"
+                        className="p-1 hover:bg-white rounded-md text-slate-500 hover:text-red-500 transition-colors"
                       >
                         <Minus size={14} />
                       </button>
-                      <span className="w-8 text-center text-sm font-bold text-slate-700">
+                      <span className="w-8 text-center text-sm font-black text-slate-700">
                         {item.quantity}
                       </span>
                       <button
                         onClick={() => updateQuantity(index, 1)}
-                        className="p-1.5 hover:bg-white hover:text-green-600 rounded-md transition-colors text-slate-500"
+                        className="p-1 hover:bg-white rounded-md text-slate-500 hover:text-green-600 transition-colors"
                       >
                         <Plus size={14} />
                       </button>
                     </div>
-                    <button
-                      onClick={() => removeFromCart(index)}
-                      className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    {/* Precios */}
+                    <div className="text-right">
+                      <p className="text-[10px] text-slate-400 font-medium mb-0.5">
+                        S/ {item.price.toFixed(2)} c/u
+                      </p>
+                      <p className="font-black text-slate-800">
+                        S/ {(item.quantity * item.price).toFixed(2)}
+                      </p>
+                    </div>
                   </div>
                 </div>
               ))
             )}
           </div>
 
-          <div className="p-5 bg-white border-t border-slate-200 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-20">
-            <div className="space-y-1 mb-4 text-xs text-slate-500 border-b border-slate-100 pb-2">
-              <div className="flex justify-between">
-                <span>Op. Gravada (Base)</span>
+          {/* 3. FOOTER DEL CARRITO: NOTA + TOTALES + BOTÓN */}
+          <div className="bg-white border-t border-slate-200 z-20 shadow-[0_-10px_15px_-3px_rgba(0,0,0,0.05)] flex flex-col">
+            {/* Nota Compacta Integrada */}
+            <div className="px-4 py-2.5 border-b border-slate-100 bg-yellow-50/30">
+              <input
+                type="text"
+                placeholder="✍️ Nota opcional (Ej. Mesa 34, Cortesía staff...)"
+                className="w-full bg-transparent text-xs font-medium text-slate-600 outline-none placeholder:text-slate-400"
+                value={saleNote}
+                onChange={(e) => setSaleNote(e.target.value)}
+                maxLength={200}
+              />
+            </div>
+
+            {/* Zona de Totales */}
+            <div className="p-5">
+              <div className="flex justify-between text-xs text-slate-500 mb-1.5 font-medium">
+                <span>Op. Gravada</span>
                 <span>S/ {baseImponible.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between text-xs text-slate-500 mb-3 font-medium">
                 <span>IGV (18%)</span>
                 <span>S/ {igvAmount.toFixed(2)}</span>
               </div>
-            </div>
-            <div className="flex justify-between items-center mb-6">
-              <span className="text-slate-600 font-bold text-lg">TOTAL</span>
-              <span className="text-3xl font-black text-slate-800">
-                S/ {totalToPay.toFixed(2)}
-              </span>
-            </div>
 
-            <div className="flex gap-2 h-14">
+              <div className="flex justify-between items-end mb-5">
+                <span className="text-slate-800 font-black text-sm uppercase tracking-wider">
+                  TOTAL
+                </span>
+                <span className="text-4xl font-black text-blue-600 leading-none">
+                  S/ {totalToPay.toFixed(2)}
+                </span>
+              </div>
+
               <button
                 onClick={handleOpenPayment}
                 disabled={cart.length === 0 || isLoading}
-                className={`flex-1 rounded-xl font-bold text-xl tracking-wide shadow-lg transition-all active:scale-95 flex items-center justify-center gap-3 ${isLoading || cart.length === 0 ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-black shadow-slate-300"}`}
+                className={`w-full py-4 rounded-xl font-black text-lg tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                  isLoading || cart.length === 0
+                    ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200"
+                }`}
               >
-                {isLoading ? "PROCESANDO..." : "COBRAR"}
+                {isLoading ? "PROCESANDO..." : "COBRAR AHORA"}
               </button>
             </div>
           </div>

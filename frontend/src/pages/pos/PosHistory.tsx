@@ -23,6 +23,7 @@ interface Sale {
   status: string;
   invoice_type_code: string;
   client_name?: string;
+  notes?: string;
   details: SaleDetail[];
   credit_notes?: any[];
 }
@@ -251,11 +252,13 @@ const PosHistory = () => {
               {/* Cabecera del Detalle */}
               <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-start">
                 <div>
+                  {/* 👇 1. SOLUCIÓN AL TÍTULO (Manejamos los 3 tipos) */}
                   <h2 className="text-2xl font-black text-slate-800 mb-1">
                     {selectedSale.invoice_type_code === "01"
-                      ? "Factura"
-                      : "Boleta"}{" "}
-                    Electrónica
+                      ? "Factura Electrónica"
+                      : selectedSale.invoice_type_code === "03"
+                        ? "Boleta Electrónica"
+                        : "Ticket de Cortesía"}
                   </h2>
                   <p className="text-lg font-bold text-blue-600 mb-2">
                     {selectedSale.series}-{selectedSale.number}
@@ -272,6 +275,17 @@ const PosHistory = () => {
                       {new Date(selectedSale.date).toLocaleString()}
                     </span>
                   </p>
+                  {/* 👇 NUEVO: Si hay nota, la mostramos resaltada */}
+                  {selectedSale.notes && (
+                    <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800 shadow-sm animate-in fade-in">
+                      <strong className="font-black flex items-center gap-1">
+                        ✍️ Nota del cajero:
+                      </strong>
+                      <span className="italic mt-1 block">
+                        {selectedSale.notes}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Etiqueta Gigante de Anulado */}
@@ -358,7 +372,7 @@ const PosHistory = () => {
                     <Printer size={20} /> REIMPRIMIR TICKET
                   </button>
 
-                  {/* Lógica: Si está anulada mostramos imprimir NC, sino mostramos anular */}
+                  {/* 👇 2. SOLUCIÓN AL BOTÓN DE ANULAR */}
                   {selectedSale.credit_notes &&
                   selectedSale.credit_notes.length > 0 ? (
                     <button
@@ -369,7 +383,9 @@ const PosHistory = () => {
                     >
                       <FileWarning size={20} /> TICKET NOTA CRÉDITO
                     </button>
-                  ) : selectedSale.status !== "CANCELED" ? (
+                  ) : selectedSale.status !== "CANCELED" &&
+                    selectedSale.invoice_type_code !== "99" ? (
+                    /* Agregamos && selectedSale.invoice_type_code !== "99" para proteger la SUNAT */
                     <button
                       onClick={() => setIsVoidModalOpen(true)}
                       className="flex-1 bg-red-50 text-red-600 border-2 border-red-200 hover:bg-red-100 font-bold py-4 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2"

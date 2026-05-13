@@ -29,6 +29,11 @@ class TicketEngine:
     def generate(self, doc_obj, title_lbl, items, total_label="TOTAL", is_note=False):
         sale = doc_obj.sale if is_note else doc_obj
 
+        # 👇 NUEVO: Detectar si es cortesía
+        is_courtesy = getattr(sale, "is_courtesy", False)
+        if is_courtesy:
+            title_lbl = "TICKET DE CORTESÍA"
+
         series_num = f"{doc_obj.series}-{doc_obj.number}"
         date_str = doc_obj.date.strftime("%d/%m/%Y %H:%M:%S")
 
@@ -36,8 +41,10 @@ class TicketEngine:
         pagos_h = (
             (len(sale.payments.all()) * self.row_h + self.row_h) if not is_note else 0
         )
-        qr_size = self.ancho_util * 0.45
-        qr_h = qr_size + (15 * mm)
+
+        # 👇 MODIFICADO: Si es cortesía no hay QR, ahorramos papel térmico
+        qr_size = self.ancho_util * 0.45 if not is_courtesy else 0
+        qr_h = qr_size + (15 * mm) if not is_courtesy else (20 * mm)
 
         base_h = 160 * mm
         alto_total = base_h + items_h + pagos_h + qr_h
@@ -70,7 +77,9 @@ class TicketEngine:
         y -= self.row_h * 1.5
 
         # --- 2. DATOS DEL DOCUMENTO ---
-        c.setFont("Helvetica-Bold", 9)
+        c.setFont(
+            "Helvetica-Bold", 11 if is_courtesy else 9
+        )  # Más grande si es cortesía
         c.drawCentredString(self.x_cen, y, title_lbl.upper())
         y -= self.row_h * 1.2
         c.setFont("Helvetica-Bold", 11)
@@ -80,7 +89,7 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- 3. INFO CLIENTE ---
+        # --- 3. INFO CLIENTE Y AUDITORÍA ---
         c.setFont("Helvetica", 8)
         lbl_x = self.x_izq
         val_x = self.x_izq + (18 * mm)
@@ -105,6 +114,19 @@ class TicketEngine:
         c.drawString(val_x, y, dir_cli[:35])
         y -= self.row_h
 
+        # 👇 NUEVO: Imprimir quién autorizó si es cortesía
+        if is_courtesy and getattr(sale, "authorized_by", None):
+            auth_user = sale.authorized_by
+            auth_name = (
+                f"{auth_user.first_name} {auth_user.last_name}".strip()
+                or auth_user.username
+            )
+            c.setFont("Helvetica-Bold", 8)
+            c.drawString(lbl_x, y, "Autorizado:")
+            c.drawString(val_x, y, auth_name[:35])
+            c.setFont("Helvetica", 8)
+            y -= self.row_h
+
         if is_note:
             c.drawString(lbl_x, y, "Ref:")
             c.drawString(val_x, y, f"{sale.series}-{sale.number}")
@@ -113,11 +135,22 @@ class TicketEngine:
             c.drawString(val_x, y, doc_obj.description[:35])
             y -= self.row_h
 
-        forma_pago = "CONTADO"
-        if len(sale.payments.all()) > 1:
-            forma_pago = "MIXTO"
-        elif sale.payments.exists() and sale.payments.first().payment_method != "CASH":
-            forma_pago = sale.payments.first().payment_method.replace("_", " ")
+        if getattr(sale, "notes", None):
+            c.setFont("Helvetica-Bold", 9)
+            c.drawString(lbl_x, y, "NOTA:")
+            c.drawString(val_x, y, sale.notes[:35])
+            y -= self.row_h
+            c.setFont("Helvetica", 8)
+
+        forma_pago = "CORTESÍA (100% DSCTO)" if is_courtesy else "CONTADO"
+        if not is_courtesy:
+            if len(sale.payments.all()) > 1:
+                forma_pago = "MIXTO"
+            elif (
+                sale.payments.exists()
+                and sale.payments.first().payment_method != "CASH"
+            ):
+                forma_pago = sale.payments.first().payment_method.replace("_", " ")
 
         c.drawString(lbl_x, y, "F. Pago:")
         c.drawString(val_x, y, forma_pago)
@@ -143,9 +176,11 @@ class TicketEngine:
         y -= self.row_h
 
         c.setFont("Helvetica", 7)
+        valor_real_regalos = 0  # Para sumar cuánto costaba todo originalmente
         for d in items:
             p_unit = float(d.subtotal) / float(d.quantity) if d.quantity > 0 else 0
             prod_name = d.product.name
+            valor_real_regalos += float(d.subtotal)
 
             c.drawString(col_cant, y, f"{d.quantity:.0f}")
             c.drawString(col_desc, y, prod_name[:18])
@@ -162,15 +197,21 @@ class TicketEngine:
         y -= self.row_h * 1.5
 
         # --- 5. TOTALES ---
-        # 👇 SOLUCIÓN AL ERROR 500: Extraemos los datos de forma segura
         total_gravada = getattr(doc_obj, "total_gravada", sale.total_gravada)
         total_igv = getattr(doc_obj, "total_igv", sale.total_igv)
-        total_doc = getattr(
-            doc_obj, "total", sale.total
-        )  # <-- ESTA LÍNEA ESTABA FALLANDO
+        total_doc = getattr(doc_obj, "total", sale.total)
 
         c.setFont("Helvetica", 8)
         lbl_tot_x = self.x_der - (20 * mm)
+
+        # 👇 NUEVO: Mostrar el descuento explícito si es cortesía
+        if is_courtesy:
+            c.drawRightString(lbl_tot_x, y, "Valor Real: S/")
+            c.drawRightString(self.x_der, y, f"{valor_real_regalos:.2f}")
+            y -= self.row_h
+            c.drawRightString(lbl_tot_x, y, "Dscto. Autorizado: S/")
+            c.drawRightString(self.x_der, y, f"-{valor_real_regalos:.2f}")
+            y -= self.row_h
 
         c.drawRightString(lbl_tot_x, y, "Op. Gravada: S/")
         c.drawRightString(self.x_der, y, f"{total_gravada}")
@@ -215,6 +256,8 @@ class TicketEngine:
                     m_txt = "TARJETA"
                 elif m_txt == "YAPE":
                     m_txt = "YAPE"
+                elif m_txt == "COURTESY":
+                    m_txt = "CORTESÍA APROBADA"
 
                 c.drawString(self.x_izq, y, f"PAGO: {m_txt}")
                 c.drawRightString(self.x_der, y, f"S/ {p.amount}")
@@ -224,42 +267,66 @@ class TicketEngine:
             y -= self.row_h * 1.5
 
         # --- 8. QR Y PIE DE PÁGINA ---
-        c.setFont("Helvetica", 7)
-        doc_type_footer = (
-            "BOLETA DE VENTA" if sale.invoice_type_code == "03" else "FACTURA"
-        )
-        if is_note:
-            doc_type_footer = "NOTA DE CRÉDITO"
+        # 👇 MODIFICADO: Bloque completo para dividir Normal vs Cortesía
+        if not is_courtesy:
+            c.setFont("Helvetica", 7)
+            doc_type_footer = (
+                "BOLETA DE VENTA" if sale.invoice_type_code == "03" else "FACTURA"
+            )
+            if is_note:
+                doc_type_footer = "NOTA DE CRÉDITO"
 
-        c.drawCentredString(
-            self.x_cen, y, f"Representación impresa de la {doc_type_footer} electrónica"
-        )
-        y -= self.row_h * 2
+            c.drawCentredString(
+                self.x_cen,
+                y,
+                f"Representación impresa de la {doc_type_footer} electrónica",
+            )
+            y -= self.row_h * 2
 
-        # Generar QR (👇 Se asegura el tipo de documento para evitar otro error 500)
-        doc_code = (
-            getattr(doc_obj, "note_type", "07") if is_note else sale.invoice_type_code
-        )
+            # Generar QR
+            doc_code = (
+                getattr(doc_obj, "note_type", "07")
+                if is_note
+                else sale.invoice_type_code
+            )
 
-        qr_data = f"20491934671|{doc_code}|{doc_obj.series}|{doc_obj.number}|{total_igv}|{total_doc}|{doc_obj.date.strftime('%d/%m/%Y')}|{sale.customer.document_type if sale.customer else '-'}|{sale.customer.tax_id if sale.customer else '-'}|"
-        qr_code = qr.QrCodeWidget(qr_data)
-        qr_code.barWidth = qr_size
-        qr_code.barHeight = qr_size
-        bounds = qr_code.getBounds()
-        w = bounds[2] - bounds[0]
-        h = bounds[3] - bounds[1]
-        d = Drawing(qr_size, qr_size, transform=[qr_size / w, 0, 0, qr_size / h, 0, 0])
-        d.add(qr_code)
-        renderPDF.draw(d, c, self.x_cen - (qr_size / 2), y - qr_size)
-        y -= qr_size + 5 * mm
+            qr_data = f"20491934671|{doc_code}|{doc_obj.series}|{doc_obj.number}|{total_igv}|{total_doc}|{doc_obj.date.strftime('%d/%m/%Y')}|{sale.customer.document_type if sale.customer else '-'}|{sale.customer.tax_id if sale.customer else '-'}|"
+            qr_code = qr.QrCodeWidget(qr_data)
+            qr_code.barWidth = qr_size
+            qr_code.barHeight = qr_size
+            bounds = qr_code.getBounds()
+            w = bounds[2] - bounds[0]
+            h = bounds[3] - bounds[1]
+            d = Drawing(
+                qr_size, qr_size, transform=[qr_size / w, 0, 0, qr_size / h, 0, 0]
+            )
+            d.add(qr_code)
+            renderPDF.draw(d, c, self.x_cen - (qr_size / 2), y - qr_size)
+            y -= qr_size + 5 * mm
 
-        c.setFont("Helvetica", 7)
-        c.drawCentredString(self.x_cen, y, "Consulta tu comprobante en:")
-        y -= self.row_h
-        c.drawCentredString(self.x_cen, y, "facturacion.agacorp.pe")
-        y -= self.row_h * 1.5
+            c.setFont("Helvetica", 7)
+            c.drawCentredString(self.x_cen, y, "Consulta tu comprobante en:")
+            y -= self.row_h
+            c.drawCentredString(self.x_cen, y, "facturacion.agacorp.pe")
+            y -= self.row_h * 1.5
+
+        else:
+            # 🛑 ESTE ES EL FOOTER EXCLUSIVO DE CORTESÍA (Sin QR)
+            c.setFont("Helvetica-Bold", 10)
+            c.drawCentredString(self.x_cen, y, "*** NO VÁLIDO PARA SUNAT ***")
+            y -= self.row_h * 1.5
+            c.setFont("Helvetica", 8)
+            c.drawCentredString(self.x_cen, y, "Uso exclusivo de Control Interno")
+            y -= self.row_h
+            c.drawCentredString(self.x_cen, y, "Sin derecho a crédito fiscal")
+            y -= self.row_h * 1.5
+
         c.setFont("Helvetica-Bold", 8)
-        c.drawCentredString(self.x_cen, y, "¡¡GRACIAS POR SU COMPRA!!")
+        c.drawCentredString(
+            self.x_cen,
+            y,
+            "¡¡GRACIAS POR SU COMPRA!!" if not is_courtesy else "LÚDICUS PARK",
+        )
         y -= self.row_h * 1.5
 
         self.drawDottedLine(c, y)

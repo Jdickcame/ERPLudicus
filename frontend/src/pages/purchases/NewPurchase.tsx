@@ -5,7 +5,7 @@ import {
   DollarSign,
   FileText,
   PackagePlus,
-  Plus, // Nuevo icono
+  Plus,
   RefreshCw,
   Save,
   Search,
@@ -13,8 +13,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import SearchableSelect from "../../components/common/SearchableSelect";
@@ -63,8 +62,9 @@ interface BudgetStatus {
 }
 
 const NewPurchase = () => {
-  const navigate = useNavigate();
   const { currentBranch } = useBranch();
+
+  const topRef = useRef<HTMLDivElement>(null);
 
   // --- ESTADOS DE DATOS MAESTROS ---
   const [suppliersList, setSuppliersList] = useState<Supplier[]>([]);
@@ -98,7 +98,7 @@ const NewPurchase = () => {
   const [extraTaxRate, setExtraTaxRate] = useState(0);
   const [extraTaxAmount, setExtraTaxAmount] = useState("0");
 
-  // --- 🔥 ESTADOS DE MONEDA Y TIPO DE CAMBIO (NUEVO) ---
+  // --- ESTADOS DE MONEDA Y TIPO DE CAMBIO ---
   const [currency, setCurrency] = useState<"PEN" | "USD">("PEN");
   const [exchangeRate, setExchangeRate] = useState<string>("1.000");
   const [isLoadingRate, setIsLoadingRate] = useState(false);
@@ -144,8 +144,6 @@ const NewPurchase = () => {
             api.get("/purchases/categories/"),
             api.get("/inventory/products/"),
             api.get("/purchases/purchases/choices/"),
-            api.get(`/purchases/budgets/status/?branch_id=${currentBranch.id}`),
-            // Solo cargamos presupuesto si hay fecha
             header.budget_period
               ? api.get(
                   `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
@@ -185,33 +183,24 @@ const NewPurchase = () => {
     loadData();
   }, [currentBranch, header.budget_period]);
 
-  // --- 🔥 2. LÓGICA TIPO DE CAMBIO ---
+  // --- 2. LÓGICA TIPO DE CAMBIO ---
   const fetchExchangeRate = async (dateStr: string) => {
     if (!dateStr) return;
     setIsLoadingRate(true);
     try {
-      // 🔴 CORRECCIÓN AQUÍ: Es 'get_rate' (guion bajo), no 'get-rate'
-      // Esto conecta directo con tu tabla global de Core
       const response = await api.get(
         `/exchange-rate/get_rate/?date=${dateStr}`,
       );
-
       if (response.data) {
-        // Usamos el 'sell_rate' (Venta) de tu tabla global
         setExchangeRate(String(response.data.sell_rate));
-
-        // Opcional: Si quieres ser muy estricto y que NO se pueda editar si viene del global:
-        // Pero recomiendo dejarlo editable por si el banco te dio un precio especial ese día.
       }
     } catch (error) {
       console.error("Error buscando TC Global:", error);
-      // Si falla, se queda en 1.000 o lo que el usuario escriba
     } finally {
       setIsLoadingRate(false);
     }
   };
 
-  // Efecto: Cuando cambia la fecha de emisión, buscamos el TC
   useEffect(() => {
     if (header.issue_date) {
       fetchExchangeRate(header.issue_date);
@@ -262,21 +251,17 @@ const NewPurchase = () => {
     : 0;
 
   // --- 🧮 CÁLCULOS MATEMÁTICOS ---
-
   const subtotal = details.reduce(
     (sum, item) => sum + Number(item.total_value),
     0,
   );
-
   const taxAmount = details.reduce(
     (sum, item) =>
       sum + Number(item.total_value) * (Number(item.tax_percentage) / 100),
     0,
   );
-
   const totalDocument = subtotal + taxAmount;
 
-  // Efecto secundario para impuestos extra
   useEffect(() => {
     if (extraTaxType === "RETENTION" || extraTaxType === "DETRACTION") {
       let calculatedAmount = totalDocument * (extraTaxRate / 100);
@@ -308,26 +293,20 @@ const NewPurchase = () => {
     value: any,
   ) => {
     const newDetails = [...details];
-    // Creamos una copia de la fila actual con el valor modificado
     const row = { ...newDetails[index], [field]: value };
 
-    // 🧠 LÓGICA CENTRALIZADA PARA PRODUCTOS
     if (field === "product_id") {
       const prod = products.find((p) => p.id === Number(value));
-
       if (prod) {
-        // ✅ Si eligió producto: Llenamos nombre y precio (si existe)
         row.description = prod.name;
-        // @ts-ignore (Si last_cost no está en tu interfaz Product aun, esto evita error)
+        // @ts-ignore
         if (prod.last_cost) row.unit_value = prod.last_cost;
       } else {
-        // 🧹 Si eligió "Solo Gasto" (value vacío): Limpiamos
         row.description = "";
         row.unit_value = 0;
       }
     }
 
-    // 🧮 Recálculo automático de totales
     if (
       field === "quantity" ||
       field === "unit_value" ||
@@ -360,7 +339,51 @@ const NewPurchase = () => {
     }
   };
 
-  // --- GUARDAR ---
+  // 👇 NUEVO: Función para limpiar el formulario después de guardar
+  const resetForm = () => {
+    // 1. Limpiar Proveedor
+    setRucSearch("");
+    setSupplierName("");
+    setSupplierId(null);
+    setIsNewSupplier(false);
+
+    // 2. Limpiar Cabecera
+    setHeader({
+      document_type: "FACTURA",
+      series: "",
+      number: "",
+      issue_date: new Date().toISOString().split("T")[0],
+      budget_period: new Date().toISOString().slice(0, 7),
+      due_date: new Date().toISOString().split("T")[0],
+      category: "",
+      area: areaOptions.length > 0 ? String(areaOptions[0].value) : "",
+      tax_rate: 0.18,
+      payment_condition: "CASH",
+      payment_status: "PAID",
+      cost_type: "CF",
+      payment_method: "TRANSFER",
+    });
+
+    // 3. Limpiar Detalles (Carrito)
+    setDetails([
+      {
+        product_id: null,
+        description: "",
+        quantity: 1,
+        unit_value: 0,
+        total_value: 0,
+        tax_percentage: 18,
+      },
+    ]);
+
+    // 4. Limpiar Moneda e Impuestos
+    setCurrency("PEN");
+    setExtraTaxType("NONE");
+    setExtraTaxRate(0);
+    setExtraTaxAmount("0");
+  };
+
+  // 🔥 MODIFICADO: Guardar la compra y limpiar la pantalla
   const handleSubmit = async () => {
     if (!currentBranch) return alert("⚠️ Selecciona una Sede");
     if (!rucSearch || !supplierName)
@@ -386,7 +409,6 @@ const NewPurchase = () => {
         due_date: header.payment_status === "PENDING" ? header.due_date : null,
         budget_period: `${header.budget_period}-01`,
 
-        // 🔥 NUEVOS CAMPOS DE MONEDA
         currency: currency,
         exchange_rate: currency === "PEN" ? "1.000" : exchangeRate,
 
@@ -411,7 +433,12 @@ const NewPurchase = () => {
 
       await api.post("/purchases/purchases/", payload);
       alert("¡Compra registrada exitosamente! 🚀");
-      navigate("/purchases");
+
+      // 👇 La magia ocurre aquí
+      resetForm();
+      setTimeout(() => {
+        topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 100);
     } catch (error: any) {
       console.error(error);
       alert("Error: " + JSON.stringify(error.response?.data || error.message));
@@ -429,7 +456,6 @@ const NewPurchase = () => {
     const areaBudget = budgets.find((b) => b.area == header.area);
     if (!areaBudget || !header.area) return null;
 
-    // 🔥 IMPORTANTE: Si es USD, convertimos a Soles para comparar con el presupuesto
     const currentTotalInSoles =
       currency === "USD"
         ? totalDocument * parseFloat(exchangeRate)
@@ -461,7 +487,10 @@ const NewPurchase = () => {
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto animate-in fade-in duration-500">
+    <div
+      ref={topRef}
+      className="p-6 max-w-6xl mx-auto animate-in fade-in duration-500"
+    >
       {/* CABECERA */}
       <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         <div className="flex items-center gap-3">
@@ -824,14 +853,12 @@ const NewPurchase = () => {
               <th className="p-3 w-28 text-center">Valor Unit.</th>
               <th className="p-3 text-center w-24">IGV</th>
               <th className="p-3 w-32 text-right">Subtotal</th>
-              {/* 👇 NUEVA COLUMNA TOTAL */}
               <th className="p-3 w-32 text-right text-blue-600">Total</th>
               <th className="p-3 w-10"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {details.map((row, index) => {
-              // 🧮 CÁLCULO: Subtotal + Impuesto
               const rowTotalWithTax =
                 Number(row.total_value) *
                 (1 + Number(row.tax_percentage) / 100);
@@ -847,16 +874,15 @@ const NewPurchase = () => {
                             options={[
                               {
                                 value: "",
-                                label: "-- Solo Gasto --", // Opción 1: Gasto Puro
+                                label: "-- Solo Gasto --",
                               },
                               ...products.map((p) => ({
                                 value: p.id,
-                                label: `${p.sku} - ${p.name}`, // Opción 2: Producto de Inventario
+                                label: `${p.sku} - ${p.name}`,
                               })),
                             ]}
                             value={row.product_id || ""}
                             onChange={(val) => {
-                              // 1. Actualizamos el ID del producto
                               updateRow(index, "product_id", val);
                             }}
                           />
@@ -926,7 +952,6 @@ const NewPurchase = () => {
                     </select>
                   </td>
 
-                  {/* COLUMNA SUBTOTAL */}
                   <td className="p-2 text-right font-medium text-slate-700 align-middle">
                     <div className="flex flex-col">
                       <span>
@@ -936,7 +961,6 @@ const NewPurchase = () => {
                     </div>
                   </td>
 
-                  {/* 👇 COLUMNA TOTAL + IGV (CORREGIDA) */}
                   <td className="p-2 text-right align-middle bg-blue-50/30">
                     <div className="flex flex-col">
                       <span className="font-bold text-blue-700">
@@ -968,10 +992,10 @@ const NewPurchase = () => {
           </button>
         </div>
       </div>
+
       {/* ZONA DE TOTALES */}
       <div className="flex justify-end">
         <div className="w-full md:w-[450px] bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
-          {/* 1. Totales Básicos */}
           <div className="space-y-2 mb-4 text-sm text-slate-600">
             <div className="flex justify-between">
               <span>Subtotal:</span>
@@ -993,7 +1017,6 @@ const NewPurchase = () => {
             </div>
           </div>
 
-          {/* 2. SELECTOR DE IMPUESTO EXTRA */}
           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-4">
             <p className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-1">
               <Calculator size={14} /> Impuestos Adicionales
@@ -1098,7 +1121,6 @@ const NewPurchase = () => {
             )}
           </div>
 
-          {/* 3. TOTAL FINAL A PAGAR (Multimoneda) */}
           <div className="flex justify-between pt-4 border-t-2 border-slate-800">
             <span className="font-black text-xl text-slate-900">
               TOTAL NETO:
@@ -1108,7 +1130,6 @@ const NewPurchase = () => {
                 {currency === "PEN" ? "S/" : "$"} {totalNetPay.toFixed(2)}
               </div>
 
-              {/* 👇 TOTAL FANTASMA EN SOLES (SI ES DÓLARES) */}
               {currency === "USD" && (
                 <div className="text-sm font-medium text-slate-400 mt-1">
                   (Contable: S/{" "}
@@ -1118,7 +1139,6 @@ const NewPurchase = () => {
             </div>
           </div>
 
-          {/* MENSAJE DE SALDO */}
           {currentBalance > 0 && header.payment_status === "PAID" && (
             <div className="mt-4 p-3 bg-green-100 text-green-800 rounded border border-green-300 text-xs flex flex-col gap-1">
               <div className="flex items-center gap-2 font-bold">

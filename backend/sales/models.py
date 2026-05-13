@@ -9,6 +9,10 @@ PAYMENT_METHODS = [
     ("CARD", "Visa / Yape"),
     ("TRANSFER", "Transferencia"),
     ("MIXED", "Pago Mixto"),
+    (
+        "COURTESY",
+        "Cortesía (Costo Cero)",
+    ),  # 👈 NUEVO: Para separar esto de tu caja real
 ]
 
 DOCUMENT_TYPE_CHOICES = [
@@ -50,10 +54,26 @@ class Customer(models.Model):
 class Sale(models.Model):
     # --- RELACIONES ---
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
+    notes = models.CharField(max_length=255, blank=True, null=True)
     customer = models.ForeignKey(
         Customer, on_delete=models.PROTECT, null=True, blank=True
     )
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    # 👈 CAMBIO MENOR: Le agregué related_name para que no choque con authorized_by
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="sales_made"
+    )
+
+    # 👈 NUEVO: El administrador que metió el PIN para autorizar el regalo
+    authorized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="authorized_courtesies",
+    )
+
+    # 👈 NUEVO: Check para saber que esta venta no va a SUNAT
+    is_courtesy = models.BooleanField(default=False)
 
     # --- DATOS GENERALES ---
     date = models.DateTimeField(auto_now_add=True)
@@ -80,7 +100,7 @@ class Sale(models.Model):
     total_exonerada = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total_inafecta = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
-    # 01: Factura, 03: Boleta, 07: Nota Crédito
+    # 01: Factura, 03: Boleta, 07: Nota Crédito, 99: Ticket Interno (Lo usaremos para Cortesías)
     invoice_type_code = models.CharField(max_length=2, default="03")
 
     sunat_status = models.CharField(
@@ -91,9 +111,9 @@ class Sale(models.Model):
     sunat_response_code = models.CharField(max_length=10, null=True, blank=True)
     sunat_description = models.TextField(null=True, blank=True)
     sunat_hash = models.CharField(max_length=255, null=True, blank=True)
-    sunat_xml_url = models.TextField(null=True, blank=True)  # 👈 AGREGAR ESTE
-    sunat_cdr_url = models.TextField(null=True, blank=True)  # 👈 CAMBIAR A TEXTFIELD
-    sunat_pdf_url = models.TextField(null=True, blank=True)  # 👈 YA ESTÁ OK
+    sunat_xml_url = models.TextField(null=True, blank=True)
+    sunat_cdr_url = models.TextField(null=True, blank=True)
+    sunat_pdf_url = models.TextField(null=True, blank=True)
 
     json_sent = models.JSONField(null=True, blank=True)
 
@@ -126,9 +146,6 @@ class SaleDetail(models.Model):
 
     def save(self, *args, **kwargs):
         # Convertimos a float para calcular y luego Django lo guarda como Decimal
-        # Ojo: Calcular con float puede dar micro-errores de precisión,
-        # pero para propósitos generales suele bastar.
-        # Lo ideal es usar Decimal() en todo, pero dejémoslo simple por ahora.
         self.subtotal = self.quantity * self.price
         super().save(*args, **kwargs)
 

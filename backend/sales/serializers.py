@@ -97,6 +97,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "details",
             "payments",
             "credit_notes",
+            "notes",
         ]
         read_only_fields = ["user", "branch", "date"]
         # NOTA: Quitamos 'series' y 'number' de read_only_fields para poder escribirlos desde el ViewSet
