@@ -7,6 +7,7 @@ from .views import CreditNoteViewSet, CustomerViewSet, SaleViewSet
 from .views_pdf import (
     generate_nc_pdf_view,
     generate_pdf_view,
+    print_courtesies_report_view,
     print_hourly_report_view,
     print_pmix_report_view,
 )
@@ -23,4 +24,9 @@ urlpatterns = [
     path("credit-notes/<int:pk>/print/", generate_nc_pdf_view, name="nc-pdf"),
     path("reports/hourly/print/", print_hourly_report_view, name="print_hourly"),
     path("reports/pmix/print/", print_pmix_report_view, name="print_pmix"),
+    path(
+        "reports/courtesies/print/",
+        print_courtesies_report_view,
+        name="print_courtesies_report",
+    ),
 ]

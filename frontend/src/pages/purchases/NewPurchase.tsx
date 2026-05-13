@@ -5,6 +5,7 @@ import {
   DollarSign,
   FileText,
   Link,
+  Loader2,
   PackagePlus,
   PieChart,
   Plus,
@@ -106,6 +107,9 @@ const NewPurchase = () => {
   const [currency, setCurrency] = useState<"PEN" | "USD">("PEN");
   const [exchangeRate, setExchangeRate] = useState<string>("1.000");
   const [isLoadingRate, setIsLoadingRate] = useState(false);
+
+  // --- BUSQUEDA ---
+  const [isSearchingSupplier, setIsSearchingSupplier] = useState(false);
 
   // --- CABECERA ---
   const [header, setHeader] = useState({
@@ -227,18 +231,42 @@ const NewPurchase = () => {
     }
   }, [isNoteDocument, supplierId, currentBranch]);
 
-  // --- LÓGICA DE PROVEEDORES ---
-  const handleSearchRuc = () => {
+  // --- LÓGICA DE PROVEEDORES MEJORADA ---
+  const handleSearchRuc = async () => {
     if (!rucSearch) return;
-    const found = suppliersList.find((s) => s.tax_id === rucSearch);
-    if (found) {
-      setSupplierId(found.id);
-      setSupplierName(found.name);
+
+    // 1. Búsqueda rápida en la memoria local (tus 400 proveedores)
+    const localFound = suppliersList.find((s) => s.tax_id === rucSearch);
+    if (localFound) {
+      setSupplierId(localFound.id);
+      setSupplierName(localFound.name);
       setIsNewSupplier(false);
-    } else {
+      return;
+    }
+
+    // 2. Si no está local, buscamos en SUNAT/RENIEC mediante nuestro Backend
+    setIsSearchingSupplier(true);
+    try {
+      const response = await api.get(
+        `/purchases/suppliers/search_doc/?doc=${rucSearch}`,
+      );
+      const supplierData = response.data;
+
+      // Autocompletamos con la data real de SUNAT
+      setSupplierId(supplierData.id);
+      setSupplierName(supplierData.name);
+      setIsNewSupplier(false);
+
+      // Lo agregamos a la lista local para no tener que volver a buscarlo si borramos
+      setSuppliersList((prev) => [...prev, supplierData]);
+    } catch (error) {
+      console.error("No encontrado en SUNAT/RENIEC", error);
+      // 3. Si falla (RUC inválido o API caída), pasamos a creación manual
       setSupplierId(null);
       setSupplierName("");
       setIsNewSupplier(true);
+    } finally {
+      setIsSearchingSupplier(false);
     }
   };
 
@@ -655,12 +683,17 @@ const NewPurchase = () => {
                 onKeyDown={(e) => e.key === "Enter" && handleSearchRuc()}
                 readOnly={supplierId !== null && !isNewSupplier}
               />
+              {/* 👇 BOTÓN ACTUALIZADO 👇 */}
               <button
                 onClick={handleSearchRuc}
-                disabled={supplierId !== null}
-                className="bg-blue-100 text-blue-600 p-2 rounded hover:bg-blue-200 disabled:opacity-50"
+                disabled={supplierId !== null || isSearchingSupplier}
+                className="bg-blue-100 text-blue-600 p-2 rounded hover:bg-blue-200 disabled:opacity-50 min-w-[40px] flex justify-center items-center"
               >
-                <Search size={20} />
+                {isSearchingSupplier ? (
+                  <Loader2 size={20} className="animate-spin" />
+                ) : (
+                  <Search size={20} />
+                )}
               </button>
             </div>
           </div>

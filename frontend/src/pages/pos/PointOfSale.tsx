@@ -1,25 +1,24 @@
 import {
   CheckCircle,
+  Loader2,
   Minus,
   Plus,
   Printer,
   Search,
   ShoppingCart,
   Trash2,
+  UserPlus,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-// 👇 1. Fix the api and context imports (might need to go up one more level depending on your structure)
-import api from "../../api/axios";
-import { useBranch } from "../../context/BranchContext";
-// 👇 2. Fix the PaymentModal import (it is now in the local components folder)
-import PaymentModal from "./components/PaymentModal";
-// 👇 3. Import the new PosHeader
 import { useNavigate } from "react-router-dom";
+import api from "../../api/axios";
 import { useAuth } from "../../context/AuthContext";
+import { useBranch } from "../../context/BranchContext";
+import PaymentModal from "./components/PaymentModal";
 import PosHeader from "./components/PosHeader";
 
-// ... (Interfaces Product, Customer, CartItem remain exactly the same) ...
+// --- INTERFACES ---
 interface Product {
   id: number;
   name: string;
@@ -43,13 +42,9 @@ interface CartItem {
 
 const PointOfSale = () => {
   const navigate = useNavigate();
-  // 👈 Renamed component
   const { currentBranch } = useBranch();
-
-  // 👇 NUEVO: Sacamos al usuario logueado
   const { user } = useAuth();
 
-  // 👇 NUEVO: Creamos la misma validación que usaste en la Nota de Crédito
   const isAdmin =
     user?.role === "ADMIN" || user?.role === "MANAGER" || user?.is_superuser;
 
@@ -65,8 +60,18 @@ const PointOfSale = () => {
   const [lastSaleId, setLastSaleId] = useState<number | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
-
   const [saleNote, setSaleNote] = useState("");
+
+  // 🔥 NUEVO: Estados para creación rápida de clientes
+  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
+  const [newCustomer, setNewCustomer] = useState({
+    document_type: "DNI",
+    tax_id: "",
+    name: "",
+    address: "",
+    email: "",
+    phone: "",
+  });
 
   // Carga inicial
   const loadData = async () => {
@@ -86,14 +91,11 @@ const PointOfSale = () => {
   useEffect(() => {
     const verifyCashShift = async () => {
       try {
-        // Consultamos si hay un turno abierto
         await api.get("/cash/shifts/current/");
-        // Si hay turno, cargamos los datos normalmente
         loadData();
       } catch (error: any) {
-        // Si el backend responde 404, significa que no hay turno abierto
         if (error.response?.status === 404) {
-          navigate("/pos/cash"); // Lo mandamos a aperturar
+          navigate("/pos/cash");
         }
       }
     };
@@ -103,7 +105,6 @@ const PointOfSale = () => {
     }
   }, [currentBranch, navigate]);
 
-  // Cliente seleccionado
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
 
   const invoiceType = useMemo(() => {
@@ -146,7 +147,6 @@ const PointOfSale = () => {
     setCart(newCart);
   };
 
-  // Cálculos
   const totalToPay = cart.reduce(
     (acc, item) => acc + item.quantity * item.price,
     0,
@@ -160,14 +160,12 @@ const PointOfSale = () => {
       p.sku.toLowerCase().includes(searchTerm.toLowerCase()),
   );
 
-  // 1. CLICK EN COBRAR -> ABRE MODAL
   const handleOpenPayment = () => {
     if (cart.length === 0) return alert("⚠️ Carrito vacío");
     if (!currentBranch) return alert("⚠️ Selecciona una sede");
     setIsPaymentModalOpen(true);
   };
 
-  // 2. CONFIRMACIÓN DESDE EL MODAL -> ENVÍA AL BACKEND
   const handleProcessSale = async (paymentData: any) => {
     setIsPaymentModalOpen(false);
     setIsLoading(true);
@@ -177,12 +175,7 @@ const PointOfSale = () => {
         branch_id: currentBranch?.id,
         customer: selectedCustomerId,
         payments: paymentData.payments,
-        invoice_type_code:
-          paymentData.invoice_type === "TICKET"
-            ? "99"
-            : paymentData.invoice_type === "FACTURA"
-              ? "01"
-              : "03",
+        invoice_type_code: paymentData.invoice_type_code,
         total: totalToPay.toFixed(2),
         notes: saleNote,
         details: cart.map((item) => ({
@@ -195,11 +188,8 @@ const PointOfSale = () => {
       };
 
       const response = await api.post("/sales/sales/", payload);
-      const saleData = response.data;
+      setLastSaleId(response.data.id);
 
-      setLastSaleId(saleData.id);
-
-      // Limpiamos el carrito y datos
       setCart([]);
       setSelectedCustomerId(null);
       setSaleNote("");
@@ -208,7 +198,6 @@ const PointOfSale = () => {
       setShowSuccessModal(true);
     } catch (error: any) {
       console.error(error);
-      // 👇 Mejorar el error para que te muestre si el PIN falló en Django
       const errorMsg = error.response?.data?.error || "Error al procesar venta";
       alert(`❌ ${errorMsg}`);
     } finally {
@@ -224,11 +213,9 @@ const PointOfSale = () => {
     }
 
     try {
-      console.log(`🖨️ Solicitando impresión directa para ID: ${idToPrint}`);
       const response = await api.get(`/sales/sales/${idToPrint}/print/`, {
         responseType: "blob",
       });
-
       const pdfBlob = new Blob([response.data], { type: "application/pdf" });
       const pdfUrl = window.URL.createObjectURL(pdfBlob);
 
@@ -259,6 +246,7 @@ const PointOfSale = () => {
     }
   };
 
+  // 🔥 LÓGICA DE BÚSQUEDA Y CREACIÓN DE CLIENTE MEJORADA
   const searchCustomer = async (docNumber: string) => {
     if (!docNumber) return;
     setIsLoading(true);
@@ -267,7 +255,6 @@ const PointOfSale = () => {
         `/sales/customers/search_doc/?doc=${docNumber}`,
       );
       const customerData = res.data;
-
       setCustomers((prev) => {
         const filtered = prev.filter((c) => c.id !== customerData.id);
         return [...filtered, customerData];
@@ -275,32 +262,203 @@ const PointOfSale = () => {
       setSelectedCustomerId(customerData.id);
     } catch (error) {
       console.error(error);
-      alert("❌ No se encontró información para este documento.");
-      setSelectedCustomerId(null);
+      // 👇 MAGIA: Si no lo encuentra, abrimos el modal pre-llenado en vez de una alerta
+      setNewCustomer({
+        document_type: docNumber.length === 11 ? "RUC" : "DNI",
+        tax_id: docNumber,
+        name: "",
+        address: "",
+        email: "",
+        phone: "",
+      });
+      setIsCustomerModalOpen(true);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const handleQuickCreateCustomer = async () => {
+    if (!newCustomer.name || !newCustomer.tax_id)
+      return alert("⚠️ Nombre y Documento son obligatorios");
+    setIsLoading(true);
+    try {
+      const res = await api.post("/sales/customers/", newCustomer);
+      const createdCustomer = res.data;
+
+      setCustomers((prev) => [...prev, createdCustomer]);
+      setSelectedCustomerId(createdCustomer.id); // Lo auto-seleccionamos para la venta
+      setIsCustomerModalOpen(false); // Cerramos el modal
+    } catch (error: any) {
+      console.error(error);
+      alert(error.response?.data?.error || "Error al crear cliente");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const openEmptyCustomerModal = () => {
+    setNewCustomer({
+      document_type: "DNI",
+      tax_id: "",
+      name: "",
+      address: "",
+      email: "",
+      phone: "",
+    });
+    setIsCustomerModalOpen(true);
+  };
+
   return (
-    // 👇 Added flex-col so the header sits on top and the content takes the remaining height
     <div className="h-[calc(100vh)] flex flex-col bg-slate-100 overflow-hidden font-sans">
-      {/* 👇 4. INJECT THE POS HEADER AT THE VERY TOP */}
       <PosHeader />
 
-      {/* --- AQUÍ VA EL MODAL DE PAGO --- */}
+      {/* --- MODAL CREACIÓN RÁPIDA CLIENTE --- */}
+      {isCustomerModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white p-6 rounded-2xl shadow-2xl w-full max-w-md animate-in zoom-in-95">
+            <div className="flex justify-between items-center mb-5">
+              <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                <UserPlus className="text-blue-600" /> Nuevo Cliente
+              </h2>
+              <button
+                onClick={() => setIsCustomerModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-1.5 rounded-full transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-1">
+                  <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                    Tipo Doc.
+                  </label>
+                  <select
+                    className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    value={newCustomer.document_type}
+                    onChange={(e) =>
+                      setNewCustomer({
+                        ...newCustomer,
+                        document_type: e.target.value,
+                      })
+                    }
+                  >
+                    <option value="DNI">DNI</option>
+                    <option value="RUC">RUC</option>
+                    <option value="CE">CE</option>
+                  </select>
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                    Número <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    value={newCustomer.tax_id}
+                    onChange={(e) =>
+                      setNewCustomer({ ...newCustomer, tax_id: e.target.value })
+                    }
+                    placeholder="Escribe el documento..."
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                  Razón Social / Nombres <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  value={newCustomer.name}
+                  onChange={(e) =>
+                    setNewCustomer({ ...newCustomer, name: e.target.value })
+                  }
+                  placeholder="Nombre completo..."
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                  Dirección (Opcional)
+                </label>
+                <input
+                  type="text"
+                  className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  value={newCustomer.address}
+                  onChange={(e) =>
+                    setNewCustomer({ ...newCustomer, address: e.target.value })
+                  }
+                  placeholder="Dirección..."
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                    Teléfono
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    value={newCustomer.phone}
+                    onChange={(e) =>
+                      setNewCustomer({ ...newCustomer, phone: e.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    className="w-full border border-slate-300 p-2 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    value={newCustomer.email}
+                    onChange={(e) =>
+                      setNewCustomer({ ...newCustomer, email: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={() => setIsCustomerModalOpen(false)}
+                className="flex-1 py-2.5 border border-slate-300 text-slate-700 font-bold rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleQuickCreateCustomer}
+                disabled={isLoading}
+                className="flex-1 py-2.5 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors flex justify-center items-center gap-2 shadow-md"
+              >
+                {isLoading ? (
+                  <Loader2 className="animate-spin" size={18} />
+                ) : (
+                  "Guardar Cliente"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isPaymentModalOpen && (
         <PaymentModal
           total={totalToPay}
           selectedCustomer={selectedCustomer}
-          // 🔥 NUEVO: ¡Le pasamos el poder al modal!
           isAdmin={isAdmin}
           onClose={() => setIsPaymentModalOpen(false)}
           onConfirm={handleProcessSale}
         />
       )}
 
-      {/* --- MODAL DE ÉXITO --- */}
       {showSuccessModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white p-8 rounded-2xl shadow-2xl w-96 text-center transform scale-100 animate-in zoom-in-95 duration-200">
@@ -336,11 +494,10 @@ const PointOfSale = () => {
         </div>
       )}
 
-      {/* 👇 Wrap the layout in a flex-1 container so it fills the screen below the header */}
-      <div className="flex flex-1 overflow-hidden p-4 gap-4">
+      <div className="flex flex-1 overflow-hidden p-3 md:p-4 gap-3 md:gap-4">
         {/* IZQUIERDA: CATÁLOGO */}
         <div className="flex-1 flex flex-col bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="p-4 border-b border-slate-100 z-10 bg-white">
+          <div className="p-3 md:p-4 border-b border-slate-100 z-10 bg-white">
             <div className="relative">
               <Search
                 className="absolute left-3 top-2.5 text-slate-400"
@@ -349,20 +506,20 @@ const PointOfSale = () => {
               <input
                 type="text"
                 placeholder="🔍 Buscar producto..."
-                className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50 focus:bg-white transition-colors"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 autoFocus
               />
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
+          <div className="flex-1 overflow-y-auto p-3 md:p-4 bg-slate-50 custom-scrollbar">
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
               {filteredProducts.map((product) => (
                 <div
                   key={product.id}
                   onClick={() => addToCart(product)}
-                  className={`relative group bg-white p-3 rounded-xl border border-slate-200 shadow-sm cursor-pointer hover:shadow-md active:scale-95 flex flex-col justify-between h-36 ${product.stock <= 0 ? "opacity-60 grayscale cursor-not-allowed" : ""}`}
+                  className={`relative group bg-white p-3 rounded-xl border border-slate-200 shadow-sm cursor-pointer hover:shadow-md hover:border-blue-300 active:scale-95 flex flex-col justify-between h-36 transition-all ${product.stock <= 0 ? "opacity-50 grayscale cursor-not-allowed" : ""}`}
                 >
                   <div
                     className={`absolute top-2 right-2 text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${product.stock > 10 ? "bg-green-100 text-green-700" : product.stock > 0 ? "bg-orange-100 text-orange-700" : "bg-red-100 text-red-700"}`}
@@ -379,15 +536,13 @@ const PointOfSale = () => {
                   </div>
                   <div className="mt-2 pt-2 border-t border-slate-50 flex justify-between items-center">
                     <div className="flex flex-col">
-                      <span className="text-[10px] text-slate-400">Precio</span>
-                      <span className="text-blue-600 font-black text-lg">
+                      <span className="text-blue-600 font-black text-lg leading-none">
                         S/ {parseFloat(product.price).toFixed(2)}
                       </span>
                     </div>
-                    <Plus
-                      size={18}
-                      className="text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                    />
+                    <div className="bg-blue-50 p-1.5 rounded-lg text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Plus size={16} />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -395,46 +550,50 @@ const PointOfSale = () => {
           </div>
         </div>
 
-        {/* DERECHA: TICKET (CARRITO OPTIMIZADO) */}
-        <div className="w-full md:w-[400px] flex flex-col bg-white rounded-2xl shadow-xl border border-slate-200 h-full overflow-hidden">
-          {/* 1. CABECERA Y CLIENTE (Ultra Compacto) */}
-          <div className="p-4 border-b border-slate-100 bg-white z-10 shadow-sm flex flex-col gap-3">
-            <div className="flex justify-between items-center">
-              <h2 className="font-black text-slate-800 text-lg flex items-center gap-2">
-                <ShoppingCart className="text-blue-600" size={20} /> Venta
+        {/* DERECHA: TICKET */}
+        <div className="w-full md:w-[420px] flex flex-col bg-white rounded-xl shadow-sm border border-slate-200 h-full overflow-hidden">
+          {/* CABECERA DE VENTA Y BUSCADOR DE CLIENTE */}
+          <div className="p-3 border-b border-slate-100 bg-white z-10 flex flex-col gap-2.5">
+            <div className="flex justify-between items-center px-1">
+              <h2 className="font-black text-slate-800 text-base flex items-center gap-2">
+                <ShoppingCart className="text-blue-600" size={18} /> Ticket
               </h2>
               <span
-                className={`text-[10px] px-2 py-1 rounded font-black tracking-wider uppercase ${
-                  invoiceType === "FACTURA"
-                    ? "bg-purple-100 text-purple-700"
-                    : "bg-blue-100 text-blue-700"
-                }`}
+                className={`text-[10px] px-2 py-1 rounded font-black tracking-wider uppercase ${invoiceType === "FACTURA" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}
               >
                 {invoiceType}
               </span>
             </div>
 
             {!selectedCustomerId ? (
-              <div className="relative">
-                <Search
-                  className="absolute left-3 top-2.5 text-slate-400"
-                  size={16}
-                />
-                <input
-                  type="text"
-                  id="client-search-input"
-                  placeholder="Agregar cliente (RUC/DNI)..."
-                  className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all placeholder:text-slate-400"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter")
-                      searchCustomer((e.target as HTMLInputElement).value);
-                  }}
-                />
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search
+                    className="absolute left-3 top-2.5 text-slate-400"
+                    size={14}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Agregar cliente (RUC/DNI) y Enter..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white transition-all placeholder:text-slate-400"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter")
+                        searchCustomer((e.target as HTMLInputElement).value);
+                    }}
+                  />
+                </div>
+                <button
+                  onClick={openEmptyCustomerModal}
+                  className="bg-blue-50 text-blue-600 p-1.5 rounded hover:bg-blue-100 transition-colors border border-blue-100 shadow-sm flex items-center justify-center w-8"
+                  title="Nuevo Cliente Manual"
+                >
+                  <Plus size={16} strokeWidth={3} />
+                </button>
               </div>
             ) : (
-              <div className="bg-blue-50 border border-blue-100 p-2.5 rounded-lg flex justify-between items-center animate-in fade-in">
+              <div className="bg-blue-50 border border-blue-100 p-2 rounded flex justify-between items-center animate-in fade-in">
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-blue-800 truncate">
+                  <p className="text-xs font-bold text-blue-800 truncate">
                     {selectedCustomer?.name}
                   </p>
                   <p className="text-[10px] text-blue-600 font-mono">
@@ -446,106 +605,107 @@ const PointOfSale = () => {
                   onClick={() => setSelectedCustomerId(null)}
                   className="text-blue-400 hover:text-red-500 shrink-0 ml-2 p-1 transition-colors"
                 >
-                  <X size={16} />
+                  <X size={14} />
                 </button>
               </div>
             )}
           </div>
 
-          {/* 2. LISTA DE PRODUCTOS (Expande todo el espacio restante) */}
-          <div className="flex-1 overflow-y-auto p-3 bg-slate-50/50 custom-scrollbar space-y-2">
+          {/* LISTA DE PRODUCTOS COMPACTA */}
+          <div className="flex-1 overflow-y-auto bg-white custom-scrollbar">
             {cart.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-2">
-                <ShoppingCart size={48} className="opacity-20 mb-2" />
+                <ShoppingCart size={40} className="opacity-20 mb-1" />
                 <p className="text-sm font-bold text-slate-500">
-                  El carrito está vacío
-                </p>
-                <p className="text-xs text-center px-8 opacity-60">
-                  Agrega productos desde el catálogo a la izquierda.
+                  Carrito vacío
                 </p>
               </div>
             ) : (
-              cart.map((item, index) => (
-                <div
-                  key={index}
-                  className="flex flex-col p-3 bg-white border border-slate-200 rounded-xl shadow-sm hover:shadow-md transition-shadow"
-                >
-                  <div className="flex justify-between items-start mb-2">
-                    <p className="font-bold text-sm text-slate-700 leading-tight pr-2 line-clamp-2">
-                      {item.product.name}
-                    </p>
-                    <button
-                      onClick={() => removeFromCart(index)}
-                      className="text-slate-300 hover:text-red-500 transition-colors"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-
-                  <div className="flex justify-between items-end">
-                    {/* Controles de Cantidad */}
-                    <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-slate-200">
-                      <button
-                        onClick={() => updateQuantity(index, -1)}
-                        className="p-1 hover:bg-white rounded-md text-slate-500 hover:text-red-500 transition-colors"
-                      >
-                        <Minus size={14} />
-                      </button>
-                      <span className="w-8 text-center text-sm font-black text-slate-700">
-                        {item.quantity}
+              <ul className="divide-y divide-slate-100">
+                {cart.map((item, index) => (
+                  <li
+                    key={index}
+                    className="p-3 hover:bg-slate-50 transition-colors group flex flex-col gap-2"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <span className="font-bold text-xs text-slate-700 leading-tight line-clamp-2">
+                        {item.product.name}
                       </span>
-                      <button
-                        onClick={() => updateQuantity(index, 1)}
-                        className="p-1 hover:bg-white rounded-md text-slate-500 hover:text-green-600 transition-colors"
-                      >
-                        <Plus size={14} />
-                      </button>
-                    </div>
-                    {/* Precios */}
-                    <div className="text-right">
-                      <p className="text-[10px] text-slate-400 font-medium mb-0.5">
-                        S/ {item.price.toFixed(2)} c/u
-                      </p>
-                      <p className="font-black text-slate-800">
+                      <span className="font-black text-sm text-slate-800 whitespace-nowrap">
                         S/ {(item.quantity * item.price).toFixed(2)}
-                      </p>
+                      </span>
                     </div>
-                  </div>
-                </div>
-              ))
+
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+                        <button
+                          onClick={() => updateQuantity(index, -1)}
+                          className="px-2 py-1 bg-slate-50 hover:bg-red-50 text-slate-500 hover:text-red-600 transition-colors"
+                        >
+                          <Minus size={12} strokeWidth={3} />
+                        </button>
+                        <span className="w-8 text-center text-xs font-black text-slate-700">
+                          {item.quantity}
+                        </span>
+                        <button
+                          onClick={() => updateQuantity(index, 1)}
+                          className="px-2 py-1 bg-slate-50 hover:bg-green-50 text-slate-500 hover:text-green-600 transition-colors"
+                        >
+                          <Plus size={12} strokeWidth={3} />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] text-slate-400 font-medium bg-slate-100 px-1.5 py-0.5 rounded">
+                          S/ {item.price.toFixed(2)} c/u
+                        </span>
+                        <button
+                          onClick={() => removeFromCart(index)}
+                          className="text-slate-300 hover:text-red-500 transition-colors p-1 rounded-full hover:bg-red-50"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
 
-          {/* 3. FOOTER DEL CARRITO: NOTA + TOTALES + BOTÓN */}
-          <div className="bg-white border-t border-slate-200 z-20 shadow-[0_-10px_15px_-3px_rgba(0,0,0,0.05)] flex flex-col">
-            {/* Nota Compacta Integrada */}
-            <div className="px-4 py-2.5 border-b border-slate-100 bg-yellow-50/30">
+          {/* FOOTER DEL CARRITO */}
+          <div className="bg-slate-50 border-t border-slate-200 z-20">
+            <div className="px-3 py-1.5 border-b border-slate-200 bg-yellow-50/50">
               <input
                 type="text"
-                placeholder="✍️ Nota "
-                className="w-full bg-transparent text-xs font-medium text-slate-600 outline-none placeholder:text-slate-400"
+                placeholder="✍️ Agregar nota a la venta..."
+                className="w-full bg-transparent text-[11px] font-medium text-slate-600 outline-none placeholder:text-slate-400"
                 value={saleNote}
                 onChange={(e) => setSaleNote(e.target.value)}
                 maxLength={200}
               />
             </div>
 
-            {/* Zona de Totales */}
-            <div className="p-5">
-              <div className="flex justify-between text-xs text-slate-500 mb-1.5 font-medium">
-                <span>Op. Gravada</span>
-                <span>S/ {baseImponible.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs text-slate-500 mb-3 font-medium">
-                <span>IGV (18%)</span>
-                <span>S/ {igvAmount.toFixed(2)}</span>
+            <div className="p-3 md:p-4 flex flex-col gap-2">
+              {/* 👇 AQUÍ SEPARAMOS SUBTOTAL E IGV Y AGREGAMOS UNA LÍNEA */}
+              <div className="flex flex-col gap-1.5 px-1">
+                <div className="flex justify-between items-center text-xs text-slate-500 font-medium">
+                  <span>Subtotal</span>
+                  <span>S/ {baseImponible.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs text-slate-500 font-medium">
+                  <span>IGV (18%)</span>
+                  <span>S/ {igvAmount.toFixed(2)}</span>
+                </div>
               </div>
 
-              <div className="flex justify-between items-end mb-5">
-                <span className="text-slate-800 font-black text-sm uppercase tracking-wider">
-                  TOTAL
+              <div className="border-t border-slate-200/80 mx-1 my-0.5"></div>
+
+              <div className="flex justify-between items-end px-1 mb-1">
+                <span className="text-slate-800 font-black text-xs uppercase tracking-widest">
+                  Total Pagar
                 </span>
-                <span className="text-4xl font-black text-blue-600 leading-none">
+                <span className="text-3xl font-black text-blue-600 leading-none">
                   S/ {totalToPay.toFixed(2)}
                 </span>
               </div>
@@ -553,10 +713,10 @@ const PointOfSale = () => {
               <button
                 onClick={handleOpenPayment}
                 disabled={cart.length === 0 || isLoading}
-                className={`w-full py-4 rounded-xl font-black text-lg tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 ${
+                className={`w-full mt-1 py-3.5 rounded-lg font-black text-base tracking-wide transition-all active:scale-95 flex items-center justify-center gap-2 ${
                   isLoading || cart.length === 0
-                    ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200"
+                    ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-md shadow-blue-200"
                 }`}
               >
                 {isLoading ? "PROCESANDO..." : "COBRAR AHORA"}

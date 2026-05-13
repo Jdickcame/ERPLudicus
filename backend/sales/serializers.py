@@ -91,6 +91,10 @@ class SaleSerializer(serializers.ModelSerializer):
             "payment_method",
             "status",
             "invoice_type_code",
+            # 👇 AQUÍ ESTÁ LA CORRECCIÓN: Agregamos los estados de SUNAT
+            "sunat_status",
+            "sunat_description",
+            "sunat_hash",
             "sunat_pdf_url",
             "sunat_xml_url",
             "sunat_cdr_url",

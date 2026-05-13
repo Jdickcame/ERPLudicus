@@ -20,9 +20,14 @@ def generate_pdf_view(request, pk):
         f'inline; filename="{sale.series}-{sale.number}.pdf"'
     )
 
-    titulo = (
-        "FACTURA ELECTRÓNICA" if sale.invoice_type_code == "01" else "BOLETA DE VENTA"
-    )
+    if sale.invoice_type_code == "01":
+        titulo = "FACTURA ELECTRÓNICA"
+    elif sale.invoice_type_code == "03":
+        titulo = "BOLETA DE VENTA"
+    elif sale.invoice_type_code == "00":
+        titulo = "NOTA DE VENTA"
+    else:
+        titulo = "TICKET INTERNO"
 
     # Usamos el motor
     engine = TicketEngine(response)
@@ -129,5 +134,56 @@ def print_pmix_report_view(request):
 
     engine = TicketEngine(response)
     engine.generate_pmix_report(pmix_data)
+
+    return response
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def print_courtesies_report_view(request):
+    # 1. Buscar turno abierto de este usuario
+    shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
+    if not shift:
+        return HttpResponse("No tienes un turno de caja abierto.", status=400)
+
+    # 2. Obtener TODAS las ventas válidas del turno
+    sales = (
+        Sale.objects.filter(date__gte=shift.opened_at)
+        .exclude(status="CANCELED")
+        .prefetch_related("details__product")
+    )
+
+    if request.user.role != "ADMIN" and request.user.branch:
+        sales = sales.filter(branch=request.user.branch)
+
+    # 3. Agrupar matemática de Cortesías (Como si fuera un PMIX)
+    courtesy_pmix = {}
+    total_costo_asumido = 0.0
+
+    for sale in sales:
+        # Filtramos por el código 99 o si marcaste el flag is_courtesy
+        if sale.invoice_type_code == "99" or getattr(sale, "is_courtesy", False):
+            for d in sale.details.all():
+                name = d.product.name
+                qty = float(d.quantity)
+
+                # Calculamos el costo asumido por línea
+                costo_linea = float(d.price) * qty
+                total_costo_asumido += costo_linea
+
+                # Agrupamos por nombre de producto
+                if name not in courtesy_pmix:
+                    courtesy_pmix[name] = 0
+                courtesy_pmix[name] += qty
+
+    # 4. Enviar al motor PDF
+    response = HttpResponse(content_type="application/pdf")
+    response["Content-Disposition"] = 'inline; filename="Reporte_Cortesias.pdf"'
+
+    engine = TicketEngine(response)
+    # Le pasamos el diccionario de productos y el costo total
+    engine.generate_courtesies_report(
+        courtesy_pmix, total_costo_asumido, shift.opened_at
+    )
 
     return response

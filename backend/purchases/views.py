@@ -2,7 +2,9 @@ from datetime import datetime
 from decimal import Decimal
 
 import openpyxl
+import requests
 from core.mixins import BranchAccessMixin
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, ExpressionWrapper, F, FloatField, Min, Sum
 from django.http import HttpResponse
@@ -239,6 +241,90 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = SupplierSerializer
     permission_classes = [IsAuthenticated]
 
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+
+    search_fields = ["name", "tax_id"]
+    ordering_fields = ["name", "tax_id", "balance", "id"]
+    ordering = ["-id"]  # Orden por defecto
+
+    # 🔥 NUEVO: Buscador Inteligente Local + SUNAT/RENIEC
+    @action(detail=False, methods=["get"])
+    def search_doc(self, request):
+        doc_number = request.query_params.get("doc")
+        if not doc_number:
+            return Response(
+                {"error": "Falta enviar el documento"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 1. BÚSQUEDA LOCAL (Ultra rápida, en tus 400 proveedores)
+        supplier = Supplier.objects.filter(tax_id=doc_number).first()
+        if supplier:
+            return Response(self.get_serializer(supplier).data)
+
+        # 2. BÚSQUEDA EXTERNA EN APISPERU (Si no lo tienes registrado)
+        tokenconsul = getattr(settings, "APISPERU_CONSULTA_TOKEN", None)
+        if not tokenconsul:
+            return Response(
+                {"error": "Token de ApisPeru no configurado en el servidor."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        try:
+            # DNI (8 dígitos)
+            if len(doc_number) == 8:
+                r = requests.get(
+                    f"https://dniruc.apisperu.com/api/v1/dni/{doc_number}?token={tokenconsul}",
+                    timeout=4,
+                )
+                d = r.json()
+                if r.status_code == 200 and d.get("nombres"):
+                    full_name = f"{d['nombres']} {d['apellidoPaterno']} {d.get('apellidoMaterno', '')}".strip()
+
+                    # 👇 SOLO GUARDAMOS tax_id y name
+                    new_s = Supplier.objects.create(tax_id=doc_number, name=full_name)
+                    return Response(self.get_serializer(new_s).data)
+
+            # RUC (11 dígitos)
+            elif len(doc_number) == 11:
+                r = requests.get(
+                    f"https://dniruc.apisperu.com/api/v1/ruc/{doc_number}?token={tokenconsul}",
+                    timeout=4,
+                )
+                d = r.json()
+                if r.status_code == 200 and d.get("razonSocial"):
+                    # Obtenemos la dirección de SUNAT, si viene vacía o con un guion "-", la dejamos en blanco
+                    raw_address = d.get("direccion", "")
+                    clean_address = raw_address if raw_address != "-" else ""
+
+                    # 👇 AHORA SÍ GUARDAMOS LA DIRECCIÓN OFICIAL
+                    new_s = Supplier.objects.create(
+                        tax_id=doc_number,
+                        name=d["razonSocial"],
+                        address=clean_address,  # 👈 Asegúrate de que el campo en tu models.py se llame 'address'
+                    )
+                    return Response(self.get_serializer(new_s).data)
+
+        except requests.exceptions.Timeout:
+            return Response(
+                {
+                    "error": "El servidor de SUNAT/RENIEC está tardando mucho en responder."
+                },
+                status=status.HTTP_504_GATEWAY_TIMEOUT,
+            )
+        except Exception as e:
+            print(f"Error consultando proveedor externo: {e}")
+            pass  # Si falla, bajamos al error 404 general
+
+        return Response(
+            {"error": "Proveedor no encontrado ni localmente ni en SUNAT."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
     @action(detail=True, methods=["post"])
     def add_balance(self, request, pk=None):
         supplier = self.get_object()
@@ -292,40 +378,32 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             .annotate(
                 total_debt=Sum("total_net_pay"),
                 count=Count("id"),
-                # 👇 ESTA ES LA CLAVE: Buscamos la fecha de vencimiento más antigua
+                # Buscamos la fecha de vencimiento más antigua
                 next_due_date=Min("due_date"),
             )
             # Ordenamos: Primero los que vencen antes (o ya vencieron), luego por deuda mayor
             .order_by("next_due_date", "-total_debt")
         )
 
-        # 3. Paginación manual para el Lazy Loading (Opcional, pero recomendado si tienes muchos)
+        # 3. Paginación manual para el Lazy Loading
         page = int(request.query_params.get("page", 1))
-        page_size = 20  # Mismos 20 que en tu frontend
+        page_size = 20
         start = (page - 1) * page_size
         end = start + page_size
 
-        # Convertimos QuerySet a lista para poder paginar si es una lista de diccionarios
         data = list(suppliers_debt)
         paginated_data = data[start:end]
 
         return Response(
             {
                 "results": paginated_data,
-                "next": True
-                if len(data) > end
-                else False,  # Bandera simple para saber si hay más
-                "total_global_debt": sum(
-                    item["total_debt"] for item in data
-                ),  # Total global para la tarjeta de arriba
+                "next": True if len(data) > end else False,
+                "total_global_debt": sum(item["total_debt"] for item in data),
             }
         )
 
     @action(detail=True, methods=["get"])
     def pending_invoices(self, request, pk=None):
-        """
-        Devuelve el detalle de las facturas pendientes de UN proveedor específico.
-        """
         invoices = (
             Purchase.objects.filter(supplier_id=pk, payment_status="PENDING")
             .values(
@@ -345,31 +423,24 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def statement(self, request, pk=None):
-        """
-        Devuelve el Estado de Cuenta unificado (Compras + Pagos)
-        ordenado cronológicamente para el Lazy Loading.
-        """
         supplier = self.get_object()
-
-        # Filtros de fecha
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
 
         # 1. Obtener Compras
         purchases = Purchase.objects.filter(supplier=supplier)
         if start_date:
-            purchases = purchases.filter(issue_date__gte=start_date)  # noqa: E701
+            purchases = purchases.filter(issue_date__gte=start_date)
         if end_date:
-            purchases = purchases.filter(issue_date__lte=end_date)  # noqa: E701
+            purchases = purchases.filter(issue_date__lte=end_date)
 
         purchases_data = [
             {
                 "id": p.id,
-                "purchase_id": p.id,  # 👈 ESTA ES LA CLAVE QUE FALTABA PARA EL OJITO
+                "purchase_id": p.id,
                 "date": p.issue_date,
                 "type": "COMPRA",
                 "document": f"{p.document_type} {p.series}-{p.number}",
-                # Usamos total_net_pay si esa es tu lógica de deuda real, perfecto.
                 "amount": -float(p.total_net_pay),
                 "status": p.payment_status,
                 "description": "Compra",
@@ -380,14 +451,14 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         # 2. Obtener Transacciones
         transactions = SupplierTransaction.objects.filter(supplier=supplier)
         if start_date:
-            transactions = transactions.filter(created_at__date__gte=start_date)  # noqa: E701
+            transactions = transactions.filter(created_at__date__gte=start_date)
         if end_date:
-            transactions = transactions.filter(created_at__date__lte=end_date)  # noqa: E701
+            transactions = transactions.filter(created_at__date__lte=end_date)
 
         transactions_data = [
             {
                 "id": t.id,
-                "purchase_id": None,  # 👈 En pagos va vacío
+                "purchase_id": None,
                 "date": t.created_at.date(),
                 "type": "PAGO",
                 "document": t.transaction_number,
@@ -400,8 +471,6 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
         # 3. Unificar y Ordenar
         full_statement = purchases_data + transactions_data
-
-        # Tip: Convertir a str para ordenar funciona, pero es mejor asegurar consistencia si hay fechas nulas (aunque no debería).
         full_statement.sort(key=lambda x: str(x["date"]), reverse=True)
 
         # 4. Paginación Manual
@@ -764,6 +833,7 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             "Razón Social",
             "Moneda",
             "Tipo Costo",
+            "Método de Pago",
             "Valor Venta (Subtotal)",
             "Gravado",
             "No Gravado",
@@ -792,6 +862,9 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     p.supplier.name if p.supplier else "-",
                     p.get_currency_display(),
                     p.get_cost_type_display(),
+                    p.get_payment_method_display()
+                    if hasattr(p, "get_payment_method_display")
+                    else p.payment_method,
                     float(p.subtotal),
                     gravado,
                     no_gravado,

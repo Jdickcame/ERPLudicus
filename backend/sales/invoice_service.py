@@ -1,6 +1,6 @@
 import requests
 from django.conf import settings
-from num2words import num2words  # Recuerda: pip install num2words
+from num2words import num2words
 
 # Credenciales desde settings (.env)
 API_URL = settings.APISPERU_URL
@@ -13,80 +13,69 @@ class InvoiceService:
         self.branch = sale.branch
         self.customer = sale.customer
 
+        # Para usar en la Nota de Crédito
+        self.base_url = API_URL
+        self.headers = {
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
     def generar_comprobante(self):
         print(
             f"🚀 Iniciando facturación para Venta {self.sale.series}-{self.sale.number}"
         )
 
-        # 1. Definir Tipo Documento
-        # 01 = Factura, 03 = Boleta
         tipo_doc = "01" if self.sale.invoice_type_code == "01" else "03"
 
-        # 2. Datos del Cliente
         if self.customer:
             client_num = self.customer.tax_id
             client_name = self.customer.name
-
-            # Determinar tipo de documento según largo
             if len(client_num) == 11:
-                client_type = "6"  # RUC
+                client_type = "6"
             elif len(client_num) == 8:
-                client_type = "1"  # DNI
+                client_type = "1"
             else:
-                client_type = "0"  # Otros
-
+                client_type = "0"
             client_address = self.customer.address if self.customer.address else "-"
         else:
-            # Cliente Genérico (Público General)
             client_num = "00000000"
             client_name = "PUBLICO GENERAL"
             client_type = "0"
             client_address = "-"
 
-        # 3. Cálculos Matemáticos para el JSON
-        total_venta = float(self.sale.total)  # Ej: 118.00
+        total_venta = float(self.sale.total)
         total_gravada = 0.0
         total_igv = 0.0
 
         items_payload = []
         for detail in self.sale.details.all():
-            # TUS PRECIOS EN DB INCLUYEN IGV (Ej: Precio Final S/ 59.00)
-            precio_final_unitario = float(detail.price)  # 59.00
-            cantidad = float(detail.quantity)  # 2
+            precio_final_unitario = float(detail.price)
+            cantidad = float(detail.quantity)
 
-            # Valor Unitario (Sin IGV) -> 59 / 1.18 = 50.00
             valor_unitario = precio_final_unitario / 1.18
-
-            # Valor Venta del Item (Subtotal Sin IGV) -> 50 * 2 = 100.00
             valor_venta_item = valor_unitario * cantidad
-
-            # IGV del Item -> 100 * 0.18 = 18.00
             igv_item = valor_venta_item * 0.18
 
-            # Acumulamos para la cabecera
             total_gravada += valor_venta_item
             total_igv += igv_item
 
             items_payload.append(
                 {
                     "codProducto": str(detail.product.id),
-                    "unidad": "NIU",  # NIU = Unidades
+                    "unidad": "NIU",
                     "descripcion": detail.product.name,
                     "cantidad": cantidad,
-                    # Desglose según tu documentación:
-                    "mtoValorUnitario": round(valor_unitario, 2),  # 50.00
-                    "mtoValorVenta": round(valor_venta_item, 2),  # 100.00
-                    "mtoBaseIgv": round(valor_venta_item, 2),  # 100.00
+                    "mtoValorUnitario": round(valor_unitario, 2),
+                    "mtoValorVenta": round(valor_venta_item, 2),
+                    "mtoBaseIgv": round(valor_venta_item, 2),
                     "porcentajeIgv": 18,
-                    "igv": round(igv_item, 2),  # 18.00
-                    "tipAfeIgv": "10",  # 10 = Gravado - Operación Onerosa
+                    "igv": round(igv_item, 2),
+                    "tipAfeIgv": "10",
                     "totalImpuestos": round(igv_item, 2),
-                    "mtoPrecioUnitario": round(precio_final_unitario, 2),  # 59.00
+                    "mtoPrecioUnitario": round(precio_final_unitario, 2),
                 }
             )
 
-        # 4. Generar Leyenda (Monto en Letras)
-        # Ej: "SON CIENTO DIECIOCHO CON 00/100 SOLES"
         mto_entero = int(total_venta)
         mto_decimal = int(round((total_venta - mto_entero) * 100))
         try:
@@ -96,10 +85,9 @@ class InvoiceService:
 
         leyenda_valor = f"SON {texto_monto} CON {mto_decimal:02d}/100 SOLES"
 
-        # 5. CONSTRUCCIÓN DEL JSON FINAL (Estructura ApisPeru Exacta)
         payload = {
             "ublVersion": "2.1",
-            "tipoOperacion": "0101",  # Venta Interna
+            "tipoOperacion": "0101",
             "tipoDoc": tipo_doc,
             "serie": self.sale.series,
             "correlativo": self.sale.number,
@@ -108,7 +96,7 @@ class InvoiceService:
             "tipoMoneda": "PEN",
             "client": {
                 "tipoDoc": client_type,
-                "numDoc": client_num,  # ApisPeru acepta string, mejor para evitar que borre ceros
+                "numDoc": client_num,
                 "rznSocial": client_name,
                 "address": {
                     "direccion": client_address,
@@ -119,7 +107,7 @@ class InvoiceService:
                 },
             },
             "company": {
-                "ruc": 20491934671,  # TU RUC
+                "ruc": 20491934671,
                 "razonSocial": "AGA CORP S.A.C.",
                 "nombreComercial": "AGA CORP",
                 "address": {
@@ -130,125 +118,104 @@ class InvoiceService:
                     "distrito": "SURQUILLO",
                 },
             },
-            # TOTALES CABECERA (Según tu documentación)
             "mtoOperGravadas": round(total_gravada, 2),
             "mtoIGV": round(total_igv, 2),
             "totalImpuestos": round(total_igv, 2),
             "valorVenta": round(total_gravada, 2),
-            # Totales Finales
-            "subTotal": round(total_venta, 2),  # Valor Venta + Impuestos
-            "mtoImpVenta": round(total_venta, 2),  # Importe Total a Pagar
+            "subTotal": round(total_venta, 2),
+            "mtoImpVenta": round(total_venta, 2),
             "details": items_payload,
             "legends": [{"code": "1000", "value": leyenda_valor}],
         }
 
-        # 6. ENVIAR A APISPERU
-        headers = {
-            "Authorization": f"Bearer {API_TOKEN}",
-            "Content-Type": "application/json",
-        }
-
         try:
-            # Enviamos a /invoice/send
+            # Enviamos el JSON (Guardamos evidencia de qué mandamos)
+            self.sale.json_sent = payload
             response = requests.post(
-                f"{API_URL}/invoice/send", json=payload, headers=headers
+                f"{API_URL}/invoice/send", json=payload, headers=self.headers
             )
             result = response.json()
 
-            # Log para debug
             print(f"📦 Respuesta ApisPeru: {result}")
+
+            # Guardamos la respuesta cruda en la base de datos
+            self.sale.json_response = result
 
             if response.status_code == 200:
                 print("✅ Facturación Exitosa en ApisPeru")
                 self.sale.sunat_status = "ACCEPTED"
 
-                # 1. XML
-                xml_val = result.get("xml")
-                if isinstance(xml_val, str):
-                    self.sale.sunat_xml_url = xml_val
-                elif isinstance(xml_val, dict):
-                    self.sale.sunat_xml_url = xml_val.get("url")
+                # 1. HASH: Lo sacamos directo del nivel principal
+                if "hash" in result:
+                    self.sale.sunat_hash = result["hash"]
 
-                # 2. CDR
-                cdr_val = result.get("cdr")
-                if isinstance(cdr_val, str):
-                    self.sale.sunat_cdr_url = cdr_val
-                elif isinstance(cdr_val, dict):
-                    self.sale.sunat_cdr_url = cdr_val.get("url")
+                if "xml" in result:
+                    self.sale.sunat_xml_url = result["xml"]
 
-                # 3. PDF (AQUÍ ESTÁ LA MAGIA 🪄)
-                # Intentamos leerlo de la respuesta
-                pdf_val = result.get("pdf")
-                pdf_url = None
-
-                if isinstance(pdf_val, dict):
-                    pdf_url = (
-                        pdf_val.get("url_ticket")
-                        or pdf_val.get("url_a4")
-                        or pdf_val.get("url")
+                # 2. DESCRIPCIÓN: Lo sacamos del sub-diccionario 'sunatResponse'
+                sunat_res = result.get("sunatResponse", {})
+                if isinstance(sunat_res, dict):
+                    self.sale.sunat_description = sunat_res.get(
+                        "description", "Aceptado"
                     )
-                elif isinstance(pdf_val, str):
-                    pdf_url = pdf_val
+                    if "cdrZip" in sunat_res:
+                        self.sale.sunat_cdr_url = sunat_res["cdrZip"]
 
-                # SI LA API NO LO DEVUELVE, LO CONSTRUIMOS (Formato Estándar de ApisPeru)
-                if not pdf_url:
-                    pdf_url = (
-                        f"{API_URL}/invoice/pdf?"
-                        f"ruc=20491934671&serie={self.sale.series}&"
-                        f"correlativo={self.sale.number}&tipo={tipo_doc}&"
-                        f"format=ticket"
-                        # YA NO AGREGUES EL TOKEN AQUÍ
-                    )
+                # 3. PDF URL (Formato Estándar de ApisPeru)
+                pdf_url = (
+                    f"{API_URL}/invoice/pdf?"
+                    f"ruc=20491934671&serie={self.sale.series}&"
+                    f"correlativo={self.sale.number}&tipo={tipo_doc}&"
+                    f"format=ticket"
+                )
                 self.sale.sunat_pdf_url = pdf_url
-                print(f"🖨️ PDF Generado: {self.sale.sunat_pdf_url}")
+                print(f"🖨️ PDF Generado: {pdf_url}")
 
                 self.sale.save()
                 return {"success": True, "data": result}
             else:
                 print(f"❌ Error ApisPeru: {result}")
                 self.sale.sunat_status = "REJECTED"
-                self.sale.sunat_description = result.get("message", "Error desconocido")
+                self.sale.sunat_description = result.get(
+                    "message", "Error en estructura XML/JSON"
+                )
                 self.sale.save()
                 return {"success": False, "error": result}
 
         except Exception as e:
             print(f"❌ Error de Conexión: {e}")
+            self.sale.sunat_status = "PENDING"
+            self.sale.sunat_description = str(e)
+            self.sale.save()
             return {"success": False, "error": str(e)}
 
     def enviar_nota(self, note):
         sale = note.sale
 
-        # Mapeo de campos según tu JSON de ejemplo
         data = {
             "ublVersion": "2.1",
-            "tipoDoc": note.note_type,  # 07 (Crédito) o 08 (Débito)
+            "tipoDoc": note.note_type,
             "serie": note.series,
             "correlativo": note.number,
             "fechaEmision": note.date.strftime("%Y-%m-%dT%H:%M:%S-05:00"),
-            # Datos de referencia (A quién anula)
-            "tipDocAfectado": sale.invoice_type_code,  # 01 (Factura) o 03 (Boleta)
-            "numDocfectado": f"{sale.series}-{sale.number}",  # Según tu JSON es "numDocfectado" (sic)
+            "tipDocAfectado": sale.invoice_type_code,
+            "numDocfectado": f"{sale.series}-{sale.number}",
             "codMotivo": note.reason_code,
             "desMotivo": note.description,
             "tipoMoneda": "PEN",
-            # Cliente (Igual que la venta original)
             "client": {
-                "tipoDoc": sale.customer.document_type
-                if sale.customer
-                else "0",  # 0 = Sin Doc (Varios)
+                "tipoDoc": sale.customer.document_type if sale.customer else "0",
                 "numDoc": sale.customer.tax_id if sale.customer else "00000000",
                 "rznSocial": sale.customer.name if sale.customer else "PUBLICO GENERAL",
                 "address": {
                     "direccion": sale.customer.address if sale.customer else "-"
                 },
             },
-            # Empresa (ApisPeru suele jalar esto del token, pero lo mandamos por si acaso)
             "company": {
                 "ruc": "20491934671",
                 "razonSocial": "AGA CORP S.A.C.",
                 "address": {"direccion": "Cal. Siqueiros Nro 110 - Surquillo"},
             },
-            # Montos (Si es anulación total, copiamos los de la venta)
             "mtoOperGravadas": float(sale.total_gravada),
             "mtoIGV": float(sale.total_igv),
             "totalImpuestos": float(sale.total_igv),
@@ -257,18 +224,14 @@ class InvoiceService:
             "legends": [
                 {
                     "code": "1000",
-                    "value": f"SON: {self._number_to_words(sale.total)}",  # Usamos un helper o texto fijo
+                    "value": f"SON: {self._number_to_words(sale.total)}",
                 }
             ],
         }
 
-        # Detalles
         for detail in sale.details.all():
-            # Cálculos unitarios inversos
-            precio_unitario = float(detail.subtotal) / float(
-                detail.quantity
-            )  # Incluye IGV
-            valor_unitario = precio_unitario / 1.18  # Sin IGV
+            precio_unitario = float(detail.subtotal) / float(detail.quantity)
+            valor_unitario = precio_unitario / 1.18
             igv_item = float(detail.subtotal) - (float(detail.subtotal) / 1.18)
 
             data["details"].append(
@@ -280,7 +243,7 @@ class InvoiceService:
                     "mtoBaseIgv": float(detail.subtotal) / 1.18,
                     "porcentajeIgv": 18,
                     "igv": igv_item,
-                    "tipAfeIgv": "10",  # Gravado - Operación Onerosa
+                    "tipAfeIgv": "10",
                     "totalImpuestos": igv_item,
                     "mtoValorVenta": float(detail.subtotal) / 1.18,
                     "mtoValorUnitario": valor_unitario,
@@ -288,23 +251,29 @@ class InvoiceService:
                 }
             )
 
-        # Envío al endpoint correcto
         url = f"{self.base_url}/note/send"
         note.json_sent = data
 
         try:
             r = requests.post(url, headers=self.headers, json=data, timeout=10)
-            note.json_response = r.json()
+            result = r.json()
+            note.json_response = result
 
             if r.status_code == 200:
-                # Guardamos PDF si viene
-                note.sunat_pdf_url = r.json().get("links", {}).get("pdf")
+                # Guardamos PDF construyendo la ruta estándar
+                pdf_url = (
+                    f"{API_URL}/invoice/pdf?"
+                    f"ruc=20491934671&serie={note.series}&"
+                    f"correlativo={note.number}&tipo={note.note_type}&"
+                    f"format=ticket"
+                )
+                note.sunat_pdf_url = pdf_url
                 note.save()
                 print("✅ Nota enviada correctamente")
             else:
                 print(f"❌ Error API: {r.text}")
 
-            return r.json()
+            return result
         except Exception as e:
             print(f"❌ Error conexión: {e}")
             return None

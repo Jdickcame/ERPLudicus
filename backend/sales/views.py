@@ -1,4 +1,5 @@
 import threading
+from decimal import Decimal
 
 import requests
 
@@ -9,9 +10,8 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from inventory.models import Kardex, Stock
 
-# PDF Imports (ReportLab)
 # DRF Imports
-from rest_framework import serializers, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -21,6 +21,7 @@ from .models import CreditNote, Customer, Sale
 from .serializers import CreditNoteSerializer, CustomerSerializer, SaleSerializer
 
 User = get_user_model()
+
 # --- VIEWSETS ---
 
 
@@ -86,27 +87,20 @@ class SaleViewSet(viewsets.ModelViewSet):
         if not branch_id and hasattr(self.request.user, "branch"):
             branch_id = self.request.user.branch.id
 
-        # 👈 NUEVO: Detectar si viene como cortesía desde el Frontend
         is_courtesy = (
             str(self.request.data.get("is_courtesy", "false")).lower() == "true"
         )
         supervisor = None
 
-        # 👈 NUEVO: EL GUARDIÁN DE CORTESÍAS
         if is_courtesy:
-            # 1. ¿El usuario actual YA tiene permisos? (Revisamos tu flag personalizada o si es superusuario)
             if (
                 getattr(self.request.user, "can_authorize_voids", False)
                 or self.request.user.is_superuser
             ):
-                supervisor = self.request.user  # ¡Aprobado automáticamente!
-
-            # 2. Si es un cajero normal, exigimos el PIN
+                supervisor = self.request.user
             else:
                 supervisor_pin = self.request.data.get("supervisor_pin")
 
-                # OJO: Si viene la palabra "BYPASS" desde el frontend, pero el usuario en el backend NO es admin,
-                # esto bloqueará el intento de fraude.
                 if not supervisor_pin or supervisor_pin == "BYPASS":
                     raise serializers.ValidationError(
                         {
@@ -114,7 +108,6 @@ class SaleViewSet(viewsets.ModelViewSet):
                         }
                     )
 
-                # Buscamos al gerente dueño de ese PIN
                 supervisor = User.objects.filter(
                     pin=supervisor_pin, can_authorize_voids=True
                 ).first()
@@ -127,40 +120,46 @@ class SaleViewSet(viewsets.ModelViewSet):
                     )
 
         with transaction.atomic():
-            # 1. Configurar Series
+            # 1. Leemos del frontend
+            raw_invoice_type = self.request.data.get("invoice_type_code")
+            is_nota_venta = raw_invoice_type == "00"
             is_factura = False
             cid = self.request.data.get("customer")
 
+            # 2. Configurar Tipo y Serie
             if is_courtesy:
-                # 👈 NUEVO: Si es cortesía, es un Ticket Interno
-                serie = "T001"  # Serie para tickets de control
-                tipo = "99"  # Código interno (no va a SUNAT)
+                serie = "T001"
+                tipo = "99"
+            elif is_nota_venta:
+                serie = "NV01"
+                tipo = "00"
             else:
-                # Lógica original para ventas normales
                 if cid:
                     if Customer.objects.filter(pk=cid, document_type="RUC").exists():
                         is_factura = True
                 serie = "F007" if is_factura else "B007"
                 tipo = "01" if is_factura else "03"
 
-            # 2. Correlativo
+            # 3. Correlativo
             last = Sale.objects.filter(series=serie).order_by("-number").first()
             new_num = (int(last.number) + 1) if last else 1
 
-            # 3. Guardar Venta (👈 Modificado para inyectar cortesía y autorizador)
+            # 4. Guardar Venta (Pasamos lo básico al serializer)
             sale = serializer.save(
                 branch_id=branch_id,
-                series=serie,
-                number=str(new_num).zfill(8),
-                invoice_type_code=tipo,
                 is_courtesy=is_courtesy,
                 authorized_by=supervisor,
             )
 
-            # 4. Detalles, Stock y Kardex
+            # 🔥 LA SOLUCIÓN MÁGICA: Forzamos el guardado de estos 3 campos directamente en el modelo
+            sale.series = serie
+            sale.number = str(new_num).zfill(8)
+            sale.invoice_type_code = tipo
+            sale.save()  # Aquí aseguramos que la BD tome el "00" y el "NV01"
+
+            # 5. Detalles, Stock y Kardex
             total_gravada, total_igv = 0, 0
             for d in sale.details.all():
-                # Stock
                 st, _ = Stock.objects.get_or_create(
                     branch_id=branch_id, product=d.product, defaults={"quantity": 0}
                 )
@@ -168,27 +167,24 @@ class SaleViewSet(viewsets.ModelViewSet):
                 st.quantity -= d.quantity
                 st.save()
 
-                # Kardex (Descuenta igual así sea cortesía)
                 Kardex.objects.create(
                     branch_id=branch_id,
                     product=d.product,
                     date=sale.date,
-                    type="OUT_SALE"
-                    if not is_courtesy
-                    else "OUT_COURTESY",  # 👈 Etiqueta especial en kardex
+                    type="OUT_SALE" if not is_courtesy else "OUT_COURTESY",
                     quantity=d.quantity,
                     unit_cost=d.unit_cost,
-                    total_cost=d.quantity * d.unit_cost,
+                    total_cost=Decimal(str(d.quantity)) * Decimal(str(d.unit_cost)),
                     balance_quantity=st.quantity,
                     balance_unit_cost=st.average_cost,
-                    balance_total_cost=st.quantity * st.average_cost,
+                    balance_total_cost=Decimal(str(st.quantity))
+                    * Decimal(str(st.average_cost)),
                     user=self.request.user,
                     description=f"Venta {sale.id}"
                     if not is_courtesy
                     else f"Cortesía {sale.id} (Aut: {supervisor.first_name})",
                 )
 
-                # Impuestos (Solo si NO es cortesía calculamos impuestos reales)
                 if not is_courtesy:
                     sub = float(d.subtotal)
                     base = sub / 1.18
@@ -197,24 +193,27 @@ class SaleViewSet(viewsets.ModelViewSet):
 
                 d.save()
 
-            # Forzar totales a 0 en la cabecera si es cortesía
             sale.total_gravada = round(total_gravada, 2) if not is_courtesy else 0
             sale.total_igv = round(total_igv, 2) if not is_courtesy else 0
-            # IMPORTANTE: Forzamos el total de la venta a 0 por seguridad
+
             if is_courtesy:
                 sale.total = 0
                 sale.status = "COMPLETED"
-                sale.sunat_status = "ACCEPTED"  # Falso aceptado para que no estorbe en reportes pendientes
+                sale.sunat_status = "ACCEPTED"
+
+            # Si es Nota de Venta, la damos por aceptada internamente
+            if is_nota_venta:
+                sale.sunat_status = "ACCEPTED"
+                sale.sunat_description = "Uso Interno (No enviada a SUNAT)"
 
             sale.save()
 
-            # 5. REGISTRO EN CAJA
+            # 6. REGISTRO EN CAJA
             shift = CashShift.objects.filter(
                 user=self.request.user, status="OPEN"
             ).first()
             if shift:
                 for p in sale.payments.all():
-                    # Si es cortesía, el frontend debería mandar monto 0 o método "COURTESY"
                     if p.amount > 0 and not is_courtesy:
                         CashMovement.objects.create(
                             shift=shift,
@@ -226,16 +225,53 @@ class SaleViewSet(viewsets.ModelViewSet):
                             related_sale=sale,
                         )
 
-            # 6. Facturación Electrónica (Hilo) 👈 NUEVO: Bloqueo a SUNAT
-            if not is_courtesy:
+            # 7. Facturación Electrónica a SUNAT
+            # El candado final para que NV01 y T001 NO pasen
+            if not is_courtesy and not is_nota_venta:
+                sale.sunat_status = "PENDING"
+                sale.save()
 
-                def enviar():
+                def enviar_a_sunat(venta_id):
+                    from django.db import connection
+
                     try:
-                        InvoiceService(sale).generar_comprobante()
-                    except:  # noqa: E722
-                        pass
+                        venta = Sale.objects.get(id=venta_id)
+                        InvoiceService(venta).generar_comprobante()
+                    except Exception as e:
+                        print(f"Error en hilo de SUNAT: {e}")
+                    finally:
+                        connection.close()
 
-                threading.Thread(target=enviar).start()
+                threading.Thread(target=enviar_a_sunat, args=(sale.id,)).start()
+
+    # 🔥 NUEVA ACCIÓN: REINTENTO MANUAL DE ENVÍO A SUNAT
+    @action(detail=True, methods=["post"])
+    def send_sunat(self, request, pk=None):
+        sale = self.get_object()
+
+        if sale.invoice_type_code == "99":
+            return Response(
+                {"error": "Los tickets internos no se envían a SUNAT."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if sale.sunat_status == "ACCEPTED":
+            return Response(
+                {"message": "El documento ya está aceptado."}, status=status.HTTP_200_OK
+            )
+
+        try:
+            InvoiceService(sale).generar_comprobante()
+            sale.sunat_status = "ACCEPTED"
+            sale.save()
+            return Response(
+                {"message": "✅ Documento enviado y aceptado por SUNAT correctamente."}
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Error SUNAT: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class CreditNoteViewSet(viewsets.ModelViewSet):
@@ -246,8 +282,7 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
 
-        # 🛑 1. EL GUARDIÁN: Validar permisos de anulación
-        # Si el usuario NO tiene permiso para anular, exigimos el PIN del gerente
+        # 🛑 1. EL GUARDIÁN
         if not getattr(user, "can_authorize_voids", False):
             supervisor_pin = self.request.data.get("supervisor_pin")
 
@@ -258,7 +293,6 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                     }
                 )
 
-            # Buscamos un usuario con ese PIN que SÍ tenga el permiso
             supervisor = User.objects.filter(
                 pin=supervisor_pin, can_authorize_voids=True
             ).first()
@@ -270,11 +304,10 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                     }
                 )
 
-        # ✅ 2. LÓGICA DE ANULACIÓN (Sigue exactamente igual que la tuya)
+        # ✅ 2. LÓGICA DE ANULACIÓN
         sale_id = self.request.data.get("sale")
         sale = Sale.objects.get(pk=sale_id)
 
-        # Validar duplicados
         if sale.credit_notes.exists():
             raise serializers.ValidationError(
                 {"error": "Esta venta ya fue anulada/modificada."}
@@ -298,7 +331,7 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                 note_type="07",
             )
 
-            # LOGISTICA INVERSA
+            # LOGISTICA INVERSA (Blindada con Decimal)
             if note.note_type == "07":
                 for detail in sale.details.all():
                     st = Stock.objects.get(branch=sale.branch, product=detail.product)
@@ -312,10 +345,12 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                         type="IN_RETURN",
                         quantity=detail.quantity,
                         unit_cost=st.average_cost,
-                        total_cost=detail.quantity * st.average_cost,
+                        total_cost=Decimal(str(detail.quantity))
+                        * Decimal(str(st.average_cost)),
                         balance_quantity=st.quantity,
                         balance_unit_cost=st.average_cost,
-                        balance_total_cost=st.quantity * st.average_cost,
+                        balance_total_cost=Decimal(str(st.quantity))
+                        * Decimal(str(st.average_cost)),
                         user=self.request.user,
                         description=f"Anulación {sale.series}-{sale.number}",
                     )
@@ -337,11 +372,8 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
             sale.status = "CANCELED"
             sale.save()
 
-            # ENVIAR A API (Hilo)
-            def send():
-                try:
-                    InvoiceService(None).enviar_nota(note)
-                except:  # noqa: E722
-                    pass
-
-            threading.Thread(target=send).start()
+            # ENVIAR NOTA A API (Síncrono para que se procese de inmediato)
+            try:
+                InvoiceService(None).enviar_nota(note)
+            except Exception as e:
+                print("Error enviando nota a SUNAT:", e)

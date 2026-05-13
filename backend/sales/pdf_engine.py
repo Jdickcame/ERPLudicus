@@ -142,7 +142,7 @@ class TicketEngine:
             y -= self.row_h
             c.setFont("Helvetica", 8)
 
-        forma_pago = "CORTESÍA (100% DSCTO)" if is_courtesy else "CONTADO"
+        forma_pago = "CORTESÍA" if is_courtesy else "CONTADO"
         if not is_courtesy:
             if len(sale.payments.all()) > 1:
                 forma_pago = "MIXTO"
@@ -437,6 +437,71 @@ class TicketEngine:
 
         y -= self.row_h * 0.2
         self.drawDottedLine(c, y)
+
+        c.showPage()
+        c.save()
+
+    def generate_courtesies_report(self, courtesy_pmix, total_costo, opened_at):
+        """
+        Genera el ticket consolidado de Cortesías (PMIX de Cortesías).
+        """
+        # Ordenar los productos del más regalado al menos regalado
+        sorted_pmix = sorted(
+            courtesy_pmix.items(), key=lambda item: item[1], reverse=True
+        )
+
+        base_h = 90 * mm
+        filas_h = len(sorted_pmix) * (self.row_h * 1.8)
+        alto_total = base_h + filas_h
+
+        c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
+        y = alto_total - (12 * mm)
+
+        # --- CABECERA ---
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(self.x_cen, y, "REPORTE DE CORTESIAS")
+        y -= self.row_h * 1.2
+        c.setFont("Helvetica", 8)
+        c.drawCentredString(self.x_cen, y, "Productos Regalados/Consumo")
+        y -= self.row_h * 1.5
+
+        c.setFont("Helvetica", 7)
+        c.drawCentredString(
+            self.x_cen, y, f"Apertura: {opened_at.strftime('%d/%m/%Y %H:%M')}"
+        )
+        y -= self.row_h * 2
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- TÍTULOS DE COLUMNAS ---
+        c.setFont("Helvetica-Bold", 7)
+        c.drawString(self.x_izq, y, "PRODUCTO")
+        c.drawRightString(self.x_der, y, "CANTIDAD")
+        y -= self.row_h * 1
+
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- FILAS (LOS PRODUCTOS) ---
+        c.setFont("Helvetica", 7)
+        for name, qty in sorted_pmix:
+            # Acortamos el nombre si es muy largo para que no choque con la cantidad
+            display_name = name[:25] + "..." if len(name) > 25 else name
+
+            c.drawString(self.x_izq, y, display_name)
+            # Formateamos la cantidad para que se vea bonita (ej: 2 en lugar de 2.00)
+            c.drawRightString(self.x_der, y, f"{qty:.2f}".rstrip("0").rstrip("."))
+            y -= self.row_h * 1.5
+
+        y -= self.row_h * 0.2
+        self.drawDottedLine(c, y)
+        y -= self.row_h * 1.5
+
+        # --- TOTAL FINAL ---
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(self.x_izq, y, "VALOR TOTAL ASUMIDO:")
+        c.drawRightString(self.x_der, y, f"S/ {total_costo:.2f}")
 
         c.showPage()
         c.save()

@@ -3,13 +3,13 @@ import {
   Banknote,
   CheckCircle,
   CreditCard,
+  FileText,
   Lock,
   Plus,
   Trash2,
   X,
 } from "lucide-react";
 import { useState } from "react";
-// 👇 Importa tu componente PinPad (ajusta la ruta según tu estructura)
 import PinPad from "../../../components/common/PinPad";
 
 interface Customer {
@@ -40,23 +40,21 @@ const PaymentModal = ({
   onClose,
   onConfirm,
 }: PaymentModalProps) => {
-  // Configuración Documento
-  const [docType, setDocType] = useState<"BOLETA" | "FACTURA" | "TICKET">(
-    () => {
-      return selectedCustomer?.document_type === "RUC" ? "FACTURA" : "BOLETA";
-    },
-  );
+  // Configuración Documento (👇 NUEVO: Agregado "NOTA_VENTA")
+  const [docType, setDocType] = useState<
+    "BOLETA" | "FACTURA" | "TICKET" | "NOTA_VENTA"
+  >(() => {
+    return selectedCustomer?.document_type === "RUC" ? "FACTURA" : "BOLETA";
+  });
 
-  // --- ESTADOS PARA CORTESÍA ---
+  // --- ESTADOS ---
   const [isCourtesy, setIsCourtesy] = useState(false);
   const [showPinPad, setShowPinPad] = useState(false);
   const [tempPin, setTempPin] = useState("");
   const [supervisorPin, setSupervisorPin] = useState("");
 
-  // Lista de Pagos
   const [payments, setPayments] = useState<PaymentLine[]>([]);
 
-  // Inputs Temporales
   const [currentMethod, setCurrentMethod] = useState<
     "CASH" | "CARD" | "TRANSFER"
   >("CASH");
@@ -94,16 +92,17 @@ const PaymentModal = ({
     setPayments(payments.filter((p) => p.id !== id));
   };
 
-  const handleDocTypeChange = (type: "BOLETA" | "FACTURA" | "TICKET") => {
+  const handleDocTypeChange = (
+    type: "BOLETA" | "FACTURA" | "TICKET" | "NOTA_VENTA",
+  ) => {
     if (type === "TICKET") {
-      // 👇 NUEVO: Si es Admin, entra directo sin pedir PIN
       if (isAdmin) {
-        setSupervisorPin("BYPASS"); // Un texto de relleno, el backend usará el token real
+        setSupervisorPin("BYPASS");
         setIsCourtesy(true);
         setDocType("TICKET");
         setPayments([]);
       } else {
-        setShowPinPad(true); // Si es cajero, muestra el pad
+        setShowPinPad(true);
       }
       return;
     }
@@ -112,13 +111,18 @@ const PaymentModal = ({
       return alert("Error: Para Factura necesitas un RUC.");
     }
 
+    // 👇 IMPORTANTE: Si es Nota de Venta (NV), NO es cortesía, sí se cobra.
     setIsCourtesy(false);
     setSupervisorPin("");
-    setPayments([]);
+
+    // Solo borramos pagos si venimos de cortesía para no hacerles escribir doble
+    if (isCourtesy) {
+      setPayments([]);
+    }
+
     setDocType(type);
   };
 
-  // 👇 LÓGICA CONECTADA AL COMPONENTE PINPAD
   const handlePinSubmit = () => {
     if (tempPin.length < 4) return;
 
@@ -133,8 +137,15 @@ const PaymentModal = ({
   const handleConfirm = () => {
     if (!isReady) return;
 
+    // Traducir el tipo de documento del Frontend al Backend (01, 03, 00, 99)
+    let invoiceTypeCode = "03"; // Boleta por defecto
+    if (docType === "FACTURA") invoiceTypeCode = "01";
+    if (docType === "TICKET") invoiceTypeCode = "99";
+    if (docType === "NOTA_VENTA") invoiceTypeCode = "00"; // 👈 NUEVO: Código interno para Nota de Venta
+
     const payload = {
-      invoice_type: docType,
+      invoice_type_code: invoiceTypeCode, // Enviamos el código exacto
+      invoice_type: docType, // (Lo mantengo por si lo usas en otro lado)
       payments: isCourtesy
         ? [{ payment_method: "COURTESY", amount: 0 }]
         : payments.map((p) => ({ payment_method: p.method, amount: p.amount })),
@@ -153,9 +164,7 @@ const PaymentModal = ({
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 font-sans">
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row h-[600px] relative">
-        {/* =======================================================
-            OVERLAY: INTEGRACIÓN DE TU PINPAD
-        ======================================================= */}
+        {/* PINPAD OVERLAY */}
         {showPinPad && (
           <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in zoom-in-95">
             <div className="bg-white p-6 rounded-2xl shadow-xl relative w-full max-w-sm mx-4">
@@ -168,13 +177,11 @@ const PaymentModal = ({
               >
                 <X size={24} />
               </button>
-
-              {/* TU COMPONENTE REUTILIZABLE */}
               <PinPad
                 pin={tempPin}
                 setPin={setTempPin}
                 onSubmit={handlePinSubmit}
-                maxLength={6} // Limitado a 4 dígitos para agilizar
+                maxLength={6}
                 title="Autorizar Cortesía"
                 subtitle="Costo cero (no envía a SUNAT)"
               />
@@ -304,29 +311,44 @@ const PaymentModal = ({
             </div>
           </div>
 
-          {/* Selector Documento con CORTESÍA añadida */}
-          <div className="flex bg-slate-100 p-1 rounded-lg mb-4">
-            <button
-              onClick={() => handleDocTypeChange("BOLETA")}
-              className={`flex-1 py-2 rounded font-bold text-xs ${docType === "BOLETA" ? "bg-white shadow text-blue-600" : "text-slate-400 hover:bg-slate-200"}`}
-            >
-              BOLETA
-            </button>
-            <button
-              onClick={() => handleDocTypeChange("FACTURA")}
-              className={`flex-1 py-2 rounded font-bold text-xs ${docType === "FACTURA" ? "bg-white shadow text-purple-600" : "text-slate-400 hover:bg-slate-200"}`}
-            >
-              FACTURA
-            </button>
-            <button
-              onClick={() => handleDocTypeChange("TICKET")}
-              className={`flex-1 py-2 rounded font-bold text-xs flex items-center justify-center gap-1 ${docType === "TICKET" ? "bg-slate-800 shadow text-white" : "text-slate-400 hover:bg-slate-200"}`}
-            >
-              <Lock size={12} /> CORTESÍA
-            </button>
+          {/* 👇 NUEVO SELECTOR DE DOCUMENTOS DE 4 BOTONES */}
+          <div className="flex flex-col gap-1 mb-4">
+            <div className="flex bg-slate-100 p-1 rounded-lg">
+              <button
+                onClick={() => handleDocTypeChange("BOLETA")}
+                className={`flex-1 py-2 rounded font-bold text-xs ${docType === "BOLETA" ? "bg-white shadow text-blue-600" : "text-slate-400 hover:bg-slate-200"}`}
+              >
+                BOLETA
+              </button>
+              <button
+                onClick={() => handleDocTypeChange("FACTURA")}
+                className={`flex-1 py-2 rounded font-bold text-xs ${docType === "FACTURA" ? "bg-white shadow text-purple-600" : "text-slate-400 hover:bg-slate-200"}`}
+              >
+                FACTURA
+              </button>
+            </div>
+            <div className="flex bg-slate-100 p-1 rounded-lg">
+              <button
+                onClick={() => handleDocTypeChange("NOTA_VENTA")}
+                className={`flex-1 py-2 rounded font-bold text-[11px] flex items-center justify-center gap-1 ${docType === "NOTA_VENTA" ? "bg-slate-800 shadow text-amber-400" : "text-slate-400 hover:bg-slate-200"}`}
+              >
+                <FileText size={12} /> NOTA VENTA
+              </button>
+              <button
+                onClick={() => handleDocTypeChange("TICKET")}
+                className={`flex-1 py-2 rounded font-bold text-[11px] flex items-center justify-center gap-1 ${docType === "TICKET" ? "bg-slate-800 shadow text-white" : "text-slate-400 hover:bg-slate-200"}`}
+              >
+                <Lock size={12} /> CORTESÍA
+              </button>
+            </div>
           </div>
+          {docType === "NOTA_VENTA" && (
+            <p className="text-[10px] text-amber-600 font-bold bg-amber-50 p-1.5 rounded text-center mb-2 mt-[-8px]">
+              ⚠️ Control Interno - No viaja a SUNAT
+            </p>
+          )}
 
-          <div className="flex-1 overflow-y-auto border border-slate-100 rounded-xl mb-4 bg-slate-50/50 p-2 space-y-2">
+          <div className="flex-1 overflow-y-auto border border-slate-100 rounded-xl mb-4 bg-slate-50/50 p-2 space-y-2 custom-scrollbar">
             {isCourtesy ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-400">
                 <CheckCircle size={40} className="mb-2 text-blue-500" />
@@ -401,7 +423,7 @@ const PaymentModal = ({
             <button
               onClick={handleConfirm}
               disabled={!isReady}
-              className={`flex-1 py-4 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 ${isReady ? (isCourtesy ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-slate-900 text-white hover:bg-black") : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
+              className={`flex-1 py-4 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2 transition-all ${isReady ? (isCourtesy ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-slate-900 text-white hover:bg-black") : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
             >
               <CheckCircle size={20} />{" "}
               {isCourtesy ? "CONFIRMAR CORTESÍA" : "CONFIRMAR PAGO"}
