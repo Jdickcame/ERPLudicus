@@ -3,108 +3,219 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from users.models import User
 
-# from .utils import generate_sku # (Descomenta cuando tengas tu util)
+from .utils import generate_sku
 
 
-# --- CATEGORY & PRODUCT (Se mantienen igual, están perfectos) ---
+# --- 1. CLASIFICACIÓN ---
 class Category(models.Model):
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.name
 
-    class Meta:
-        verbose_name_plural = "Categories"
+
+class Tag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    color = models.CharField(max_length=20, default="#3B82F6")
+
+    def __str__(self):
+        return self.name
 
 
+# --- 1.5 ÁREAS DE NEGOCIO (Familias para Reportes de Ingresos/Gastos) ---
+class Area(models.Model):
+    name = models.CharField(
+        max_length=100, unique=True, help_text="Ej: Cafetería, Barra, Cocina, Limpieza"
+    )
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
+# --- 2. CATÁLOGO GLOBAL DE PRODUCTOS ---
 class Product(models.Model):
     PRODUCT_TYPES = (
-        ("STOCKED", "Producto Almacenable (Venta)"),
-        ("CONSUMABLE", "Consumible (Uso Interno)"),
+        ("STOCKED", "Producto Almacenable"),
+        ("CONSUMABLE", "Materia Prima / Insumo"),
+        ("FINISHED", "Producto Terminado (Receta)"),
         ("SERVICE", "Servicio"),
-        ("ASSET", "Activo Fijo"),
     )
+
+    UOM_CHOICES = (
+        ("NIU", "Unidades (NIU)"),
+        ("KGM", "Kilogramos (KGM)"),
+        ("LTR", "Litros (LTR)"),
+        ("MTR", "Metros (MTR)"),
+        ("ZZ", "Servicio (ZZ)"),
+    )
+
     name = models.CharField(max_length=200)
-    category = models.ForeignKey(
-        Category, related_name="products", on_delete=models.CASCADE
+    area = models.ForeignKey(
+        "purchases.Area",
+        related_name="products",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
     )
+    category = models.ForeignKey(
+        Category, related_name="products", on_delete=models.PROTECT
+    )
+    tags = models.ManyToManyField(Tag, blank=True, related_name="products")
+
     product_type = models.CharField(
         max_length=20, choices=PRODUCT_TYPES, default="STOCKED"
     )
+    unit_of_measure = models.CharField(max_length=5, choices=UOM_CHOICES, default="NIU")
     sku = models.CharField(max_length=50, unique=True, blank=True)
+
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
+    is_active = models.BooleanField(default=True)
     is_sellable = models.BooleanField(default=True)
     is_purchasable = models.BooleanField(default=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2)  # Precio de Venta Base
+    manage_stock = models.BooleanField(default=True)
+    has_recipe = models.BooleanField(default=False)
 
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # 🔥 REGLA DE NEGOCIO: SOFT DELETE
+    # Si alguien intenta hacer product.delete(), solo lo inhabilitamos.
+    def delete(self, *args, **kwargs):
+        self.is_active = False
+        self.save()
+        return (
+            1,
+            {"inventory.Product": 1},
+        )  # Simulamos la respuesta de borrado de Django
+
     def save(self, *args, **kwargs):
         if not self.sku:
-            prefix = "VTA" if self.is_sellable else "INT"
-            import uuid
+            prefix_map = {
+                "STOCKED": "PRO",
+                "CONSUMABLE": "INS",
+                "FINISHED": "TER",
+                "SERVICE": "SRV",
+            }
+            prefix = prefix_map.get(self.product_type, "GEN")
+            self.sku = generate_sku(prefix=prefix)
 
-            self.sku = f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
+        if self.product_type == "FINISHED":
+            self.has_recipe = True
+            self.is_purchasable = False
+        if self.product_type == "SERVICE":
+            self.manage_stock = False
+            self.unit_of_measure = "ZZ"
+
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"[{self.sku}] {self.name}"
 
 
-# --- 1. MODELO STOCK (EL CEREBRO DEL POS) ---
-class Stock(models.Model):
-    """
-    Representa el inventario físico actual en una sede específica.
-    El POS consulta ESTA tabla para saber si puede vender.
-    """
+# --- 3. RECETA ---
+class ProductRecipe(models.Model):
+    finished_product = models.ForeignKey(
+        Product,
+        related_name="recipe_ingredients",
+        on_delete=models.CASCADE,
+        limit_choices_to={"has_recipe": True},
+    )
+    ingredient = models.ForeignKey(
+        Product,
+        related_name="used_in_recipes",
+        on_delete=models.PROTECT,
+        limit_choices_to={"manage_stock": True},
+    )
+    quantity = models.DecimalField(max_digits=10, decimal_places=4)
 
+    class Meta:
+        unique_together = ("finished_product", "ingredient")
+
+
+# --- 4. STOCK ACTUAL POR SEDE (El interruptor local) ---
+class Stock(models.Model):
     product = models.ForeignKey(
         Product, related_name="stocks", on_delete=models.CASCADE
     )
     branch = models.ForeignKey(Branch, related_name="stocks", on_delete=models.CASCADE)
 
-    quantity = models.IntegerField(default=0)
+    # 🔥 REGLA DE NEGOCIO: ¿Se vende en esta sede?
+    is_active = models.BooleanField(
+        default=True, help_text="Habilita/Deshabilita el producto solo para esta sede"
+    )
 
-    # 🔥 DATO CRÍTICO: Costo Promedio Ponderado (CPP)
-    # Se actualiza automáticamente cada vez que entra mercadería (compra o traspaso).
-    # Permite calcular la ganancia real al momento de la venta sin buscar en el historial.
+    quantity = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
+
+    # 🔥 REGLA DE NEGOCIO: Stock Mínimo por Sede
+    min_stock = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
+
     average_cost = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
-
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("product", "branch")
+        # 🔥 REGLA DE NEGOCIO: Bloqueo en Base de Datos para evitar negativos
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(quantity__gte=0), name="prevent_negative_stock"
+            )
+        ]
 
     def __str__(self):
-        return f"{self.product.name} en {self.branch.name}: {self.quantity} (Costo: {self.average_cost})"
+        return f"{self.quantity} en {self.branch.name} ({self.product.name})"
 
 
-# --- 2. MODELO TRANSFERENCIA (LAS ARTERIAS) ---
+# --- 5. DOCUMENTO DE AJUSTE (Mermas, etc) ---
+class InventoryAdjustment(models.Model):
+    ADJUSTMENT_TYPES = (
+        ("MERMA_OUT", "Salida por Merma / Daño"),
+        ("MERMA_RETURN", "Devolución por Merma (Reingreso)"),
+        ("INTERNAL", "Consumo Interno"),
+        ("ADJUST_IN", "Ajuste de Entrada (Sobrante)"),
+        ("ADJUST_OUT", "Ajuste de Salida (Faltante)"),
+        ("INITIAL", "Inventario Inicial"),
+    )
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
+    type = models.CharField(max_length=20, choices=ADJUSTMENT_TYPES)
+    reason = models.CharField(max_length=255)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class InventoryAdjustmentDetail(models.Model):
+    adjustment = models.ForeignKey(
+        InventoryAdjustment, related_name="details", on_delete=models.CASCADE
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    quantity = models.DecimalField(max_digits=10, decimal_places=4)
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
+
+
+# --- 6. TRASLADOS ENTRE SEDES ---
 class Transfer(models.Model):
-    """
-    Agrupa el movimiento de salida de una sede y la entrada a otra.
-    Garantiza que la mercadería no 'desaparezca' en el aire.
-    """
-
     STATUS_CHOICES = (
-        ("PENDING", "Pendiente de Recepción"),
-        ("COMPLETED", "Completado / Recibido"),
+        ("PENDING", "Pendiente"),
+        ("COMPLETED", "Completado"),
         ("CANCELLED", "Cancelado"),
     )
-
     origin_branch = models.ForeignKey(
         Branch, related_name="transfers_sent", on_delete=models.PROTECT
     )
     destination_branch = models.ForeignKey(
         Branch, related_name="transfers_received", on_delete=models.PROTECT
     )
-
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="PENDING")
     observation = models.TextField(blank=True)
-
     created_by = models.ForeignKey(
         User, related_name="created_transfers", on_delete=models.PROTECT
     )
@@ -115,13 +226,8 @@ class Transfer(models.Model):
         blank=True,
         on_delete=models.PROTECT,
     )
-
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
-    def clean(self):
-        if self.origin_branch == self.destination_branch:
-            raise ValidationError("La sede de origen y destino no pueden ser la misma.")
 
 
 class TransferDetail(models.Model):
@@ -129,69 +235,51 @@ class TransferDetail(models.Model):
         Transfer, related_name="details", on_delete=models.CASCADE
     )
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    quantity = models.PositiveIntegerField()
-
-    # Guardamos el costo al momento del envío para valorar la transferencia
+    quantity = models.DecimalField(max_digits=10, decimal_places=4)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=4, default=0)
 
 
-# --- 3. MODELO KARDEX (LA HISTORIA FINANCIERA) ---
+# --- 7. KARDEX (EL LIBRO MAYOR INMUTABLE) ---
 class Kardex(models.Model):
-    """
-    Log inmutable de cada movimiento. NUNCA se edita, solo se crean nuevos registros.
-    Sustituye a 'InventoryMovement' pero con esteroides financieros.
-    """
-
+    # 🔥 REGLA DE NEGOCIO: Tipos de Movimiento Exactos
     MOVEMENT_TYPES = (
         ("IN_PURCHASE", "Entrada por Compra"),
-        ("IN_TRANSFER", "Entrada por Traslado"),
-        ("IN_ADJUSTMENT", "Entrada por Ajuste (+ Sobrante)"),
+        ("IN_ADJUSTMENT", "Ajuste de Entrada"),
+        ("IN_TRANSFER", "Transferencia de Entrada"),
+        ("IN_RETURN", "Devolución por Merma"),
+        ("IN_PRODUCTION", "Entrada por Producción"),
         ("OUT_SALE", "Salida por Venta"),
-        ("OUT_TRANSFER", "Salida por Traslado"),
-        ("OUT_INTERNAL", "Salida por Consumo Interno"),
-        ("OUT_DAMAGE", "Salida por Merma/Daño"),
-        ("OUT_ADJUSTMENT", "Salida por Ajuste (- Faltante)"),
+        ("OUT_MERMA", "Salida por Merma"),
+        ("OUT_ADJUSTMENT", "Ajuste de Salida"),
+        ("OUT_TRANSFER", "Transferencia de Salida"),
+        ("OUT_RECIPE", "Salida por Consumo de Receta"),
+        ("OUT_RETURN", "Salida por Devolución a Proveedor"),
     )
 
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE)
     product = models.ForeignKey(
         Product, related_name="kardex_entries", on_delete=models.CASCADE
     )
-
-    # Fecha y Hora exacta del movimiento
     date = models.DateTimeField(auto_now_add=True)
-
-    # Tipo de movimiento
     type = models.CharField(max_length=20, choices=MOVEMENT_TYPES)
 
-    # Cantidad que entró o salió (+10 o -5)
-    quantity = models.IntegerField()
+    quantity = models.DecimalField(max_digits=12, decimal_places=4)
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=4)
+    total_cost = models.DecimalField(max_digits=12, decimal_places=2)
 
-    # 💰 DATOS FINANCIEROS DEL MOVIMIENTO (El "Costo de este movimiento")
-    unit_cost = models.DecimalField(
-        max_digits=12, decimal_places=4
-    )  # A cuánto entró o salió
-    total_cost = models.DecimalField(
-        max_digits=12, decimal_places=2
-    )  # quantity * unit_cost
+    balance_quantity = models.DecimalField(max_digits=12, decimal_places=4)
+    balance_unit_cost = models.DecimalField(max_digits=12, decimal_places=4)
+    balance_total_cost = models.DecimalField(max_digits=14, decimal_places=2)
 
-    # 📸 SNAPSHOT (FOTO) DEL ESTADO DESPUÉS DEL MOVIMIENTO
-    # Esto permite reconstruir la historia sin recalcular desde cero.
-    balance_quantity = models.IntegerField()  # Cuántos quedaron en Stock
-    balance_unit_cost = models.DecimalField(
-        max_digits=12, decimal_places=4
-    )  # Nuevo Costo Promedio
-    balance_total_cost = models.DecimalField(
-        max_digits=14, decimal_places=2
-    )  # Valor total del inventario
-
-    # Referencias (Opcionales pero recomendadas)
     user = models.ForeignKey(User, on_delete=models.PROTECT)
-
-    # Campos para vincular con otros módulos (evita importaciones circulares usando strings)
-    # purchase = models.ForeignKey('purchases.Purchase', null=True, blank=True...)
-    # transfer = models.ForeignKey(Transfer, null=True, blank=True...)
+    reference_document = models.CharField(max_length=100, blank=True)
     description = models.CharField(max_length=255, blank=True)
 
+    # 🔥 REGLA DE NEGOCIO: INMUTABILIDAD TOTAL
+    def delete(self, *args, **kwargs):
+        raise ValidationError(
+            "¡ALERTA CRÍTICA! El Kardex es un documento financiero inmutable. Está estrictamente prohibido eliminar registros."
+        )
+
     def __str__(self):
-        return f"{self.get_type_display()} - {self.product.sku} ({self.quantity})"
+        return f"{self.get_type_display()} - {self.product.sku}"

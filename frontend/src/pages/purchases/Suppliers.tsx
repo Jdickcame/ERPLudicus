@@ -68,24 +68,40 @@ const Suppliers = () => {
 
   // --- FUNCIÓN DE CARGA DINÁMICA ---
   const loadSuppliers = useCallback(async () => {
+    // Si no hay branch, no cargamos nada para evitar errores
+    // (A menos que los proveedores sean globales, en cuyo caso quita esto)
     if (!currentBranch) return;
+
     setLoading(true);
 
     try {
       const params: any = {
-        branch_id: currentBranch.id,
+        // branch_id: currentBranch.id, // OJO: Si los proveedores son globales para toda la empresa, puedes quitar esto.
         page: page,
-        page_size: pageSize,
+        page_size: pageSize, // Enviamos el límite
         ordering: ordering,
       };
 
-      if (debouncedSearch) params.search = debouncedSearch;
+      if (debouncedSearch) {
+        params.search = debouncedSearch; // Esto activa el filters.SearchFilter de Django
+      }
 
       const response = await api.get("/purchases/suppliers/", { params });
 
-      const data = response.data.results || response.data;
-      setSuppliers(Array.isArray(data) ? data : []);
-      setTotalCount(response.data.count || data.length || 0);
+      // Verificamos si Django devolvió un objeto paginado (con results) o la lista plana
+      if (response.data && response.data.results) {
+        setSuppliers(response.data.results);
+        setTotalCount(response.data.count);
+      } else {
+        // Si Django devuelve la lista plana ignorando la paginación, la forzamos visualmente aquí
+        const allData = Array.isArray(response.data) ? response.data : [];
+        setTotalCount(allData.length);
+
+        // Paginación manual en el frontend
+        const startIndex = (page - 1) * pageSize;
+        const endIndex = startIndex + pageSize;
+        setSuppliers(allData.slice(startIndex, endIndex));
+      }
     } catch (error) {
       console.error("Error cargando proveedores:", error);
     } finally {
@@ -300,15 +316,21 @@ const Suppliers = () => {
                       </td>
                       <td className="p-4 text-right">
                         {balance > 0 ? (
-                          <span className="text-green-700 font-bold bg-green-100 px-2.5 py-1 rounded-md text-[11px]">
-                            + S/ {balance.toFixed(2)}
-                          </span>
-                        ) : balance < 0 ? (
-                          <span className="text-red-700 font-bold bg-red-100 px-2.5 py-1 rounded-md text-[11px]">
+                          <span
+                            className="text-red-700 font-bold bg-red-50 border border-red-200 px-2.5 py-1 rounded-md text-[11px]"
+                            title="Deuda por pagar"
+                          >
                             S/ {balance.toFixed(2)}
                           </span>
+                        ) : balance < 0 ? (
+                          <span
+                            className="text-green-700 font-bold bg-green-50 border border-green-200 px-2.5 py-1 rounded-md text-[11px]"
+                            title="Saldo a tu favor"
+                          >
+                            + S/ {Math.abs(balance).toFixed(2)}
+                          </span>
                         ) : (
-                          <span className="text-slate-400 font-medium">
+                          <span className="text-slate-400 font-medium bg-slate-50 px-2.5 py-1 rounded-md text-[11px]">
                             S/ 0.00
                           </span>
                         )}

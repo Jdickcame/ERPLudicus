@@ -113,23 +113,43 @@ const SupplierStatement = () => {
         {/* SALDO GIGANTE */}
         <div className="text-right bg-slate-900 text-white p-5 rounded-2xl shadow-xl min-w-[250px]">
           <p className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">
-            Saldo Total Pendiente
+            Estado de Cuenta
           </p>
-          <h2
-            className={`text-4xl font-black ${
-              (supplier?.balance || 0) > 0 ? "text-red-400" : "text-green-400"
-            }`}
-          >
-            S/{" "}
-            {parseFloat(supplier?.balance || 0).toLocaleString("es-PE", {
-              minimumFractionDigits: 2,
-            })}
-          </h2>
-          <p className="text-[10px] text-slate-500 mt-1">
-            {(supplier?.balance || 0) > 0
-              ? "Tiene deuda pendiente"
-              : "Sin deuda / Saldo a favor"}
-          </p>
+
+          {parseFloat(supplier?.balance || 0) > 0 ? (
+            <>
+              <h2 className="text-4xl font-black text-red-400">
+                S/{" "}
+                {parseFloat(supplier?.balance || 0).toLocaleString("es-PE", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </h2>
+              <p className="text-[11px] text-red-300/80 mt-1 font-medium">
+                ⚠️ Tienes una deuda pendiente
+              </p>
+            </>
+          ) : parseFloat(supplier?.balance || 0) < 0 ? (
+            <>
+              <h2 className="text-4xl font-black text-green-400">
+                + S/{" "}
+                {Math.abs(parseFloat(supplier?.balance || 0)).toLocaleString(
+                  "es-PE",
+                  { minimumFractionDigits: 2, maximumFractionDigits: 2 },
+                )}
+              </h2>
+              <p className="text-[11px] text-green-300/80 mt-1 font-medium">
+                ✅ Saldo a tu favor
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-4xl font-black text-slate-300">S/ 0.00</h2>
+              <p className="text-[11px] text-slate-500 mt-1 font-medium">
+                ✔️ Cuentas saldadas
+              </p>
+            </>
+          )}
         </div>
       </div>
 

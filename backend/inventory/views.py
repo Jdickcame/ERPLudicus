@@ -1,146 +1,319 @@
+from decimal import Decimal
+
 from core.mixins import BranchAccessMixin
 from django.db import transaction
-from rest_framework import viewsets
+from django.shortcuts import get_object_or_404
+from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-# 👇 CORRECCIÓN DE IMPORTACIONES
-from .models import Category, Kardex, Product, Stock
+from .models import (
+    Category,
+    InventoryAdjustment,
+    InventoryAdjustmentDetail,
+    Kardex,
+    Product,
+    ProductRecipe,
+    Stock,
+    Tag,
+    Transfer,
+)
 from .serializers import (
     CategorySerializer,
-    KardexSerializer,  # Reemplaza a InventoryMovementSerializer
+    InventoryAdjustmentSerializer,
+    KardexSerializer,
+    ProductRecipeSerializer,
     ProductSerializer,
     StockSerializer,
+    TagSerializer,
+    TransferSerializer,
 )
 
 
+# --- 1. CATEGORÍAS Y ETIQUETAS ---
 class CategoryViewSet(viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
     permission_classes = [IsAuthenticated]
 
 
+class TagViewSet(viewsets.ModelViewSet):
+    queryset = Tag.objects.all()
+    serializer_class = TagSerializer
+    permission_classes = [IsAuthenticated]
+
+
+# --- 2. PRODUCTOS Y RECETAS ---
 class ProductViewSet(BranchAccessMixin, viewsets.ModelViewSet):
-    queryset = Product.objects.all()
+    queryset = Product.objects.filter(is_active=True).prefetch_related(
+        "tags", "category"
+    )
     serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    @action(detail=True, methods=["get"])
-    def stock_by_branch(self, request, pk=None):
-        product = self.get_object()
-        branch_id = request.query_params.get("branch_id")
-
-        if not branch_id:
-            return Response({"error": "branch_id parameter is required"}, status=400)
-
-        try:
-            stock_record = Stock.objects.get(product=product, branch_id=branch_id)
-            quantity = stock_record.quantity
-        except Stock.DoesNotExist:
-            quantity = 0
-
-        return Response(
-            {"product": product.name, "branch_id": branch_id, "quantity": quantity}
-        )
+    def perform_destroy(self, instance):
+        # Usamos el Soft Delete que programamos en el modelo
+        instance.delete()
 
 
-# --- STOCK VIEWSET ---
+class ProductRecipeViewSet(viewsets.ModelViewSet):
+    queryset = ProductRecipe.objects.all()
+    serializer_class = ProductRecipeSerializer
+    permission_classes = [IsAuthenticated]
+
+    # Filtro para ver la receta de un producto específico
+    def get_queryset(self):
+        qs = super().get_queryset()
+        finished_product_id = self.request.query_params.get("finished_product")
+        if finished_product_id:
+            qs = qs.filter(finished_product_id=finished_product_id)
+        return qs
+
+
+# --- 3. STOCK ACTUAL ---
 class StockViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = StockSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = Stock.objects.all().select_related("product")
+        queryset = Stock.objects.filter(
+            product__is_active=True, is_active=True
+        ).select_related("product", "branch")
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
         return queryset
 
 
-# --- 🛡️ NUEVO: KARDEX VIEWSET (Reemplaza a InventoryMovement) ---
+# --- 4. KARDEX (HISTORIAL) ---
 class KardexViewSet(BranchAccessMixin, viewsets.ModelViewSet):
-    """
-    Historial financiero y de movimientos.
-    """
-
     serializer_class = KardexSerializer
     permission_classes = [IsAuthenticated]
+    http_method_names = [
+        "get",
+        "head",
+        "options",
+    ]  # 🔥 REGLA: El Kardex SOLO se lee, NUNCA se edita desde la API directamente
 
     def get_queryset(self):
-        queryset = Kardex.objects.all().order_by("-date")
+        queryset = (
+            Kardex.objects.all()
+            .order_by("-date")
+            .select_related("product", "branch", "user")
+        )
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
         return queryset
 
 
-class InventoryView(BranchAccessMixin, viewsets.ViewSet):
+# --- 5. MOTOR DE AJUSTES (MERMAS, SOBRANTES, INICIAL) ---
+class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
+    queryset = InventoryAdjustment.objects.all().order_by("-created_at")
+    serializer_class = InventoryAdjustmentSerializer
     permission_classes = [IsAuthenticated]
 
-    # Endpoint para registrar salidas internas (Mermas, Consumos, Regalos)
-    @action(detail=False, methods=["post"], url_path="internal-output")
-    def internal_output(self, request):
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
         branch_id = request.data.get("branch_id")
-        product_id = request.data.get("product_id")
-        quantity = int(request.data.get("quantity", 0))
-        reason = request.data.get("reason", "Consumo Interno")
-        # Tipos válidos: OUT_INTERNAL, OUT_DAMAGE, etc.
-        mov_type = request.data.get("type", "OUT_INTERNAL")
+        adj_type = request.data.get("type")
+        reason = request.data.get("reason", "Ajuste manual")
+        details = request.data.get(
+            "details", []
+        )  # Lista de {product_id, quantity, unit_cost}
 
-        if quantity <= 0:
-            return Response({"error": "La cantidad debe ser mayor a 0"}, status=400)
+        if not details:
+            return Response(
+                {"error": "Debe incluir al menos un producto"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        try:
-            with transaction.atomic():
-                # 1. Verificar Stock
-                stock_record = Stock.objects.select_for_update().get(
-                    branch_id=branch_id, product_id=product_id
-                )
+        # 1. Crear la cabecera del Ajuste
+        adjustment = InventoryAdjustment.objects.create(
+            branch_id=branch_id, type=adj_type, reason=reason, created_by=request.user
+        )
 
-                if stock_record.quantity < quantity:
-                    return Response(
-                        {
-                            "error": f"Stock insuficiente. Disponible: {stock_record.quantity}"
-                        },
-                        status=400,
+        # Mapeo de reglas según el tipo de ajuste
+        # Si es positivo (Entrada), suma. Si es negativo (Salida), resta.
+        is_entry = adj_type in ["MERMA_RETURN", "ADJUST_IN", "INITIAL"]
+
+        kardex_type_map = {
+            "MERMA_OUT": "OUT_MERMA",
+            "MERMA_RETURN": "IN_RETURN",
+            "INTERNAL": "OUT_ADJUSTMENT",
+            "ADJUST_IN": "IN_ADJUSTMENT",
+            "ADJUST_OUT": "OUT_ADJUSTMENT",
+            "INITIAL": "IN_ADJUSTMENT",
+        }
+        k_type = kardex_type_map.get(adj_type, "OUT_ADJUSTMENT")
+
+        for item in details:
+            product = get_object_or_404(Product, id=item.get("product_id"))
+
+            # Si el producto no maneja stock (ej. servicios), lo ignoramos
+            if not product.manage_stock:
+                continue
+
+            qty = Decimal(str(item.get("quantity", 0)))
+            if qty <= 0:
+                raise ValueError(f"La cantidad de {product.name} debe ser mayor a 0")
+
+            # Obtenemos o creamos el stock para bloquearlo temporalmente mientras operamos
+            stock, created = Stock.objects.select_for_update().get_or_create(
+                branch_id=branch_id,
+                product=product,
+                defaults={"quantity": 0, "average_cost": 0},
+            )
+
+            # Lógica de Salida vs Entrada
+            if not is_entry:
+                if stock.quantity < qty:
+                    raise ValueError(
+                        f"Stock insuficiente para {product.name}. Actual: {stock.quantity}"
                     )
 
-                # 2. Capturar Costo Promedio ANTES de la salida
-                # (En salidas, el costo unitario es el costo promedio actual)
-                current_cost = stock_record.average_cost
+                # En salidas, usamos el costo promedio actual del almacén
+                costo_unitario = stock.average_cost
+                qty_kardex = -qty
+                stock.quantity -= qty
+            else:
+                # En entradas, usamos el costo que nos envían o el actual si mandan 0
+                costo_unitario = Decimal(str(item.get("unit_cost", stock.average_cost)))
 
-                # 3. Restar Stock
-                stock_record.quantity -= quantity
-                stock_record.save()
-
-                # 4. Registrar en KARDEX (Con datos financieros)
-                Kardex.objects.create(
-                    branch_id=branch_id,
-                    product_id=product_id,
-                    quantity=-quantity,  # Negativo porque sale
-                    type=mov_type,
-                    description=reason,
-                    user=request.user,
-                    # 💰 Datos Financieros
-                    unit_cost=current_cost,
-                    total_cost=current_cost * quantity,
-                    # 📸 Snapshot del saldo
-                    balance_quantity=stock_record.quantity,
-                    balance_unit_cost=stock_record.average_cost,
-                    balance_total_cost=stock_record.quantity
-                    * stock_record.average_cost,
+                # Recalculamos el Costo Promedio Ponderado (CPP) si es una entrada
+                total_value_old = stock.quantity * stock.average_cost
+                total_value_new = qty * costo_unitario
+                new_qty = stock.quantity + qty
+                stock.average_cost = (
+                    (total_value_old + total_value_new) / new_qty if new_qty > 0 else 0
                 )
 
-            return Response({"message": "Salida registrada en Kardex correctamente"})
+                qty_kardex = qty
+                stock.quantity = new_qty
 
-        except Stock.DoesNotExist:
-            return Response(
-                {"error": "El producto no tiene stock registrado en esta sede"},
-                status=404,
+            stock.save()
+
+            # Guardar el detalle del ajuste
+            InventoryAdjustmentDetail.objects.create(
+                adjustment=adjustment,
+                product=product,
+                quantity=qty,
+                unit_cost=costo_unitario,
             )
-        except Exception as e:
-            return Response({"error": str(e)}, status=500)
+
+            # Registrar en KARDEX
+            Kardex.objects.create(
+                branch_id=branch_id,
+                product=product,
+                type=k_type,
+                quantity=qty_kardex,
+                unit_cost=costo_unitario,
+                total_cost=qty * costo_unitario,
+                balance_quantity=stock.quantity,
+                balance_unit_cost=stock.average_cost,
+                balance_total_cost=stock.quantity * stock.average_cost,
+                user=request.user,
+                reference_document=f"AJUSTE #{adjustment.id}",
+                description=reason,
+            )
+
+        serializer = self.get_serializer(adjustment)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# --- 6. MOTOR DE TRASLADOS (ENTRE SEDES) ---
+class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
+    queryset = Transfer.objects.all().order_by("-created_at")
+    serializer_class = TransferSerializer
+    permission_classes = [IsAuthenticated]
+
+    # ... (La creación de traslados pendientes la dejamos por defecto para que React envíe el JSON) ...
+
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def receive(self, request, pk=None):
+        """
+        Punto final donde la sede de destino dice: "Ya me llegó la mercadería".
+        Aquí es donde restamos a Trujillo y le sumamos a Chiclayo.
+        """
+        transfer = self.get_object()
+
+        if transfer.status != "PENDING":
+            return Response(
+                {"error": "Solo se pueden recibir traslados pendientes"}, status=400
+            )
+
+        # Procesar cada producto del traslado
+        for detail in transfer.details.all():
+            if not detail.product.manage_stock:
+                continue
+
+            # 1. QUITAR DE ORIGEN
+            stock_origin = Stock.objects.select_for_update().get(
+                branch=transfer.origin_branch, product=detail.product
+            )
+            if stock_origin.quantity < detail.quantity:
+                raise ValueError(
+                    f"Trujillo ya no tiene stock suficiente de {detail.product.name} para completar este traslado."
+                )
+
+            costo_traslado = stock_origin.average_cost  # Se va con el costo de Trujillo
+            stock_origin.quantity -= detail.quantity
+            stock_origin.save()
+
+            # Kardex Origen
+            Kardex.objects.create(
+                branch=transfer.origin_branch,
+                product=detail.product,
+                type="OUT_TRANSFER",
+                quantity=-detail.quantity,
+                unit_cost=costo_traslado,
+                total_cost=detail.quantity * costo_traslado,
+                balance_quantity=stock_origin.quantity,
+                balance_unit_cost=stock_origin.average_cost,
+                balance_total_cost=stock_origin.quantity * stock_origin.average_cost,
+                user=request.user,
+                reference_document=f"TRASLADO OUT #{transfer.id}",
+            )
+
+            # 2. PONER EN DESTINO
+            stock_dest, _ = Stock.objects.select_for_update().get_or_create(
+                branch=transfer.destination_branch,
+                product=detail.product,
+                defaults={"quantity": 0, "average_cost": costo_traslado},
+            )
+
+            # Recalcular Promedio en Chiclayo
+            total_old = stock_dest.quantity * stock_dest.average_cost
+            total_new = detail.quantity * costo_traslado
+            stock_dest.quantity += detail.quantity
+            stock_dest.average_cost = (total_old + total_new) / stock_dest.quantity
+            stock_dest.save()
+
+            # Kardex Destino
+            Kardex.objects.create(
+                branch=transfer.destination_branch,
+                product=detail.product,
+                type="IN_TRANSFER",
+                quantity=detail.quantity,
+                unit_cost=costo_traslado,
+                total_cost=detail.quantity * costo_traslado,
+                balance_quantity=stock_dest.quantity,
+                balance_unit_cost=stock_dest.average_cost,
+                balance_total_cost=stock_dest.quantity * stock_dest.average_cost,
+                user=request.user,
+                reference_document=f"TRASLADO IN #{transfer.id}",
+            )
+
+        # 3. Marcar como completado
+        transfer.status = "COMPLETED"
+        transfer.received_by = request.user
+        transfer.save()
+
+        return Response(
+            {"message": "Traslado recibido exitosamente y stock actualizado"}
+        )

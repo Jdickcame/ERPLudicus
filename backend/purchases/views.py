@@ -16,10 +16,10 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-# 👇 IMPORTACIONES CORREGIDAS
-# Traemos Product desde inventory (que es donde realmente vive)
+# 👇 IMPORTAMOS LA NUEVA TABLA 'AreaBranchBudget'
 from .models import (
     Area,
+    AreaBranchBudget,
     AreaMonthlyAdjustment,
     AreaMonthlyLimit,
     ExpenseCategory,
@@ -44,27 +44,23 @@ class StandardResultsSetPagination(PageNumberPagination):
     max_page_size = 100
 
 
-# --- 2. VIEWSET DE PRESUPUESTOS (BLINDADO) ---
+# --- 2. VIEWSET DE PRESUPUESTOS (NUEVA ARQUITECTURA) ---
 class AreaBudgetViewSet(viewsets.ModelViewSet):
     serializer_class = AreaBudgetSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Consultamos la tabla nueva 'Area'
+        # Como el Área ahora es Global, devolvemos todas para los selects del Frontend
         queryset = Area.objects.all()
         branch_id = self.request.query_params.get("branch_id")
+
+        # Opcional: Si quieres que en los selectores solo salgan áreas que tienen presupuesto en esa sede
         if branch_id:
-            queryset = queryset.filter(branch_id=branch_id)
+            queryset = queryset.filter(branch_configs__branch_id=branch_id).distinct()
+
         return queryset
 
-    def perform_create(self, serializer):
-        branch_id = self.request.data.get("branch_id")
-        if branch_id:
-            serializer.save(branch_id=branch_id)
-        else:
-            serializer.save()
-
-    # 🛡️ ACCIÓN STATUS: Calcular gastos POR SEDE
+    # 🛡️ ACCIÓN STATUS: Calcular gastos POR SEDE usando la nueva tabla
     @action(detail=False, methods=["get"])
     def status(self, request):
         branch_id = request.query_params.get("branch_id")
@@ -84,33 +80,37 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
             now = datetime.now()
             target_year, target_month = now.year, now.month
 
-        budgets = Area.objects.filter(branch_id=branch_id)
+        # 👇 AQUÍ ESTÁ LA MAGIA: Buscamos las configuraciones de PRESUPUESTO de esta sede
+        branch_budgets = AreaBranchBudget.objects.filter(
+            branch_id=branch_id
+        ).select_related("area")
         data = []
 
-        for budget in budgets:
-            # A. BUSCAR LÍMITE BASE (Prioridad: Mensual > Global)
+        for bb in branch_budgets:
+            area = bb.area
+
+            # A. BUSCAR LÍMITE BASE (Prioridad: Mensual > Base de Sede)
             monthly_limit_obj = AreaMonthlyLimit.objects.filter(
-                area=budget, year=target_year, month=target_month
+                area=area, branch_id=branch_id, year=target_year, month=target_month
             ).first()
 
             if monthly_limit_obj:
                 base_limit = float(monthly_limit_obj.amount)
             else:
-                base_limit = float(budget.budget_limit)  # Fallback al global
+                base_limit = float(bb.budget_limit)  # Fallback al global de la sede
 
             # B. BUSCAR AJUSTES (Rollover)
             adjustment_obj = AreaMonthlyAdjustment.objects.filter(
-                area=budget, year=target_year, month=target_month
+                area=area, branch_id=branch_id, year=target_year, month=target_month
             ).first()
             extra_budget = float(adjustment_obj.amount) if adjustment_obj else 0.00
 
-            # C. CALCULAR TOTALES
+            # C. CALCULAR TOTALES GASTADOS
             monthly_details = PurchaseDetail.objects.filter(
                 purchase__branch_id=branch_id,
-                area=budget,  # Filtramos por el área en el detalle
+                area=area,  # Filtramos por el Área Global
                 purchase__budget_period__year=target_year,
                 purchase__budget_period__month=target_month,
-                # Evitamos sumar compras anuladas si existen
                 purchase__payment_status__in=["PAID", "PENDING"],
             )
 
@@ -133,9 +133,9 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
 
             data.append(
                 {
-                    "id": budget.id,
-                    "area": budget.id,
-                    "area_label": budget.name,
+                    "id": area.id,
+                    "area": area.id,
+                    "area_label": area.name,
                     "limit": final_limit,
                     "base_limit": base_limit,
                     "extra_budget": extra_budget,
@@ -151,28 +151,28 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def set_limit(self, request):
-        """
-        Guarda el límite para un mes específico.
-        """
         area_id = request.data.get("area_id")
+        branch_id = request.data.get("branch_id")  # 👈 Requerido
         amount = request.data.get("amount")
-        month_str = request.data.get("month")  # "YYYY-MM"
+        month_str = request.data.get("month")
 
-        if not area_id or amount is None or not month_str:
-            return Response({"error": "Faltan datos"}, status=400)
+        if not area_id or not branch_id or amount is None or not month_str:
+            return Response(
+                {"error": "Faltan datos (area_id, branch_id, amount, month)"},
+                status=400,
+            )
 
         try:
             year, month = map(int, month_str.split("-"))
-            area = Area.objects.get(id=area_id)
 
-            # Guardamos o actualizamos el límite ESPECÍFICO de ese mes
+            # Guardamos el límite ESPECÍFICO para esa sede y ese mes
             obj, created = AreaMonthlyLimit.objects.update_or_create(
-                area=area, year=year, month=month, defaults={"amount": amount}
+                area_id=area_id,
+                branch_id=branch_id,
+                year=year,
+                month=month,
+                defaults={"amount": amount},
             )
-
-            # Opcional: Si quieres que este sea también el nuevo "default" para el futuro,
-            # descomenta la siguiente línea:
-            # area.budget_limit = amount; area.save()
 
             return Response({"message": "Límite mensual actualizado"})
         except Exception as e:
@@ -180,54 +180,56 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def rollover(self, request):
-        """
-        Transfiere presupuesto de un mes (origen) a otro (destino).
-        Resta del origen y Suma al destino.
-        """
         area_id = request.data.get("area_id")
+        branch_id = request.data.get("branch_id")  # 👈 Requerido
         amount = request.data.get("amount")
-        source_month_str = request.data.get("source_month")  # Ej: "2026-02"
-        target_month_str = request.data.get("target_month")  # Ej: "2026-03"
+        source_month_str = request.data.get("source_month")
+        target_month_str = request.data.get("target_month")
 
-        if not area_id or not amount or not source_month_str or not target_month_str:
+        if (
+            not area_id
+            or not branch_id
+            or not amount
+            or not source_month_str
+            or not target_month_str
+        ):
             return Response({"error": "Faltan datos"}, status=400)
 
         try:
-            # Parsear fechas
             s_year, s_month = map(int, source_month_str.split("-"))
             t_year, t_month = map(int, target_month_str.split("-"))
             amount = float(amount)
 
-            area = Area.objects.get(id=area_id)
-
             with transaction.atomic():
-                # 1. RESTAR del mes de Origen (Para cerrar el mes)
+                # 1. RESTAR del mes de Origen
                 source_adj, _ = AreaMonthlyAdjustment.objects.get_or_create(
-                    area=area, year=s_year, month=s_month, defaults={"amount": 0}
+                    area_id=area_id,
+                    branch_id=branch_id,
+                    year=s_year,
+                    month=s_month,
+                    defaults={"amount": 0},
                 )
                 source_adj.amount = float(source_adj.amount) - amount
                 source_adj.save()
 
                 # 2. SUMAR al mes de Destino
                 target_adj, _ = AreaMonthlyAdjustment.objects.get_or_create(
-                    area=area, year=t_year, month=t_month, defaults={"amount": 0}
+                    area_id=area_id,
+                    branch_id=branch_id,
+                    year=t_year,
+                    month=t_month,
+                    defaults={"amount": 0},
                 )
                 target_adj.amount = float(target_adj.amount) + amount
                 target_adj.save()
 
-            return Response(
-                {
-                    "message": f"Transferencia exitosa: S/ {amount} movidos de {source_month_str} a {target_month_str}."
-                }
-            )
+            return Response({"message": f"Transferencia exitosa: S/ {amount} movidos."})
 
-        except Area.DoesNotExist:
-            return Response({"error": "El área no existe"}, status=404)
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
 
-# --- 3. OTRAS VISTAS ---
+# --- 3. OTRAS VISTAS (Se mantienen exactamente igual) ---
 
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
@@ -249,9 +251,8 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
     search_fields = ["name", "tax_id"]
     ordering_fields = ["name", "tax_id", "balance", "id"]
-    ordering = ["-id"]  # Orden por defecto
+    ordering = ["-id"]
 
-    # 🔥 NUEVO: Buscador Inteligente Local + SUNAT/RENIEC
     @action(detail=False, methods=["get"])
     def search_doc(self, request):
         doc_number = request.query_params.get("doc")
@@ -261,21 +262,18 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 1. BÚSQUEDA LOCAL (Ultra rápida, en tus 400 proveedores)
         supplier = Supplier.objects.filter(tax_id=doc_number).first()
         if supplier:
             return Response(self.get_serializer(supplier).data)
 
-        # 2. BÚSQUEDA EXTERNA EN APISPERU (Si no lo tienes registrado)
         tokenconsul = getattr(settings, "APISPERU_CONSULTA_TOKEN", None)
         if not tokenconsul:
             return Response(
-                {"error": "Token de ApisPeru no configurado en el servidor."},
+                {"error": "Token no configurado"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         try:
-            # DNI (8 dígitos)
             if len(doc_number) == 8:
                 r = requests.get(
                     f"https://dniruc.apisperu.com/api/v1/dni/{doc_number}?token={tokenconsul}",
@@ -284,12 +282,9 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 d = r.json()
                 if r.status_code == 200 and d.get("nombres"):
                     full_name = f"{d['nombres']} {d['apellidoPaterno']} {d.get('apellidoMaterno', '')}".strip()
-
-                    # 👇 SOLO GUARDAMOS tax_id y name
                     new_s = Supplier.objects.create(tax_id=doc_number, name=full_name)
                     return Response(self.get_serializer(new_s).data)
 
-            # RUC (11 dígitos)
             elif len(doc_number) == 11:
                 r = requests.get(
                     f"https://dniruc.apisperu.com/api/v1/ruc/{doc_number}?token={tokenconsul}",
@@ -297,32 +292,21 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 )
                 d = r.json()
                 if r.status_code == 200 and d.get("razonSocial"):
-                    # Obtenemos la dirección de SUNAT, si viene vacía o con un guion "-", la dejamos en blanco
                     raw_address = d.get("direccion", "")
                     clean_address = raw_address if raw_address != "-" else ""
-
-                    # 👇 AHORA SÍ GUARDAMOS LA DIRECCIÓN OFICIAL
                     new_s = Supplier.objects.create(
                         tax_id=doc_number,
                         name=d["razonSocial"],
-                        address=clean_address,  # 👈 Asegúrate de que el campo en tu models.py se llame 'address'
+                        address=clean_address,
                     )
                     return Response(self.get_serializer(new_s).data)
 
-        except requests.exceptions.Timeout:
-            return Response(
-                {
-                    "error": "El servidor de SUNAT/RENIEC está tardando mucho en responder."
-                },
-                status=status.HTTP_504_GATEWAY_TIMEOUT,
-            )
         except Exception as e:
-            print(f"Error consultando proveedor externo: {e}")
-            pass  # Si falla, bajamos al error 404 general
+            print(f"Error externo: {e}")
+            pass
 
         return Response(
-            {"error": "Proveedor no encontrado ni localmente ni en SUNAT."},
-            status=status.HTTP_404_NOT_FOUND,
+            {"error": "Proveedor no encontrado."}, status=status.HTTP_404_NOT_FOUND
         )
 
     @action(detail=True, methods=["post"])
@@ -333,8 +317,7 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
         if not amount or not operation_num:
             return Response(
-                {"error": "Monto y N° Operación son obligatorios"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "Faltan datos"}, status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
@@ -345,15 +328,12 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     transaction_number=operation_num,
                     description="Recarga de Saldo / Adelanto",
                 )
-
-                supplier.balance += Decimal(str(amount))
+                supplier.balance -= Decimal(str(amount))
                 supplier.save()
-
             return Response(
                 {"status": "Saldo actualizado", "new_balance": supplier.balance}
             )
         except Exception as e:
-            print("Error en add_balance:", str(e))
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=["get"])
@@ -362,7 +342,6 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
 
-        # 1. Filtramos solo las pendientes de la sede
         pending_purchases = Purchase.objects.filter(
             payment_status="PENDING", branch_id=branch_id
         )
@@ -372,20 +351,16 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         if end_date:
             pending_purchases = pending_purchases.filter(issue_date__lte=end_date)
 
-        # 2. Agrupamos por proveedor
         suppliers_debt = (
             pending_purchases.values("supplier", "supplier__name", "supplier__tax_id")
             .annotate(
                 total_debt=Sum("total_net_pay"),
                 count=Count("id"),
-                # Buscamos la fecha de vencimiento más antigua
                 next_due_date=Min("due_date"),
             )
-            # Ordenamos: Primero los que vencen antes (o ya vencieron), luego por deuda mayor
             .order_by("next_due_date", "-total_debt")
         )
 
-        # 3. Paginación manual para el Lazy Loading
         page = int(request.query_params.get("page", 1))
         page_size = 20
         start = (page - 1) * page_size
@@ -418,7 +393,6 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             )
             .order_by("issue_date")
         )
-
         return Response(invoices)
 
     @action(detail=True, methods=["get"])
@@ -427,7 +401,6 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
 
-        # 1. Obtener Compras
         purchases = Purchase.objects.filter(supplier=supplier)
         if start_date:
             purchases = purchases.filter(issue_date__gte=start_date)
@@ -448,7 +421,6 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             for p in purchases
         ]
 
-        # 2. Obtener Transacciones
         transactions = SupplierTransaction.objects.filter(supplier=supplier)
         if start_date:
             transactions = transactions.filter(created_at__date__gte=start_date)
@@ -469,11 +441,9 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             for t in transactions
         ]
 
-        # 3. Unificar y Ordenar
         full_statement = purchases_data + transactions_data
         full_statement.sort(key=lambda x: str(x["date"]), reverse=True)
 
-        # 4. Paginación Manual
         page = int(request.query_params.get("page", 1))
         page_size = 20
         start = (page - 1) * page_size
@@ -493,7 +463,7 @@ class SupplierViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         )
 
 
-# --- 4. VIEWSET DE COMPRAS (CRUD COMPLETO CON STOCK) ---
+# --- 4. VIEWSET DE COMPRAS ---
 class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = PurchaseSerializer
     permission_classes = [IsAuthenticated]
@@ -504,7 +474,6 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         filters.SearchFilter,
         filters.OrderingFilter,
     ]
-
     filterset_fields = {
         "branch": ["exact"],
         "details__area": ["exact"],
@@ -514,12 +483,10 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         "cost_type": ["exact"],
         "currency": ["exact"],
     }
-
     search_fields = ["series", "number", "supplier__name", "supplier__tax_id"]
     ordering_fields = ["issue_date", "total_net_pay", "cost_type", "payment_status"]
 
     def get_queryset(self):
-        # Optimización: traemos supplier y branch de una vez
         queryset = (
             Purchase.objects.select_related("supplier", "branch")
             .all()
@@ -530,67 +497,108 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             queryset = queryset.filter(branch_id=branch_id)
         return queryset
 
-    # ---------------------------------------------------------
-    # 🔥 LÓGICA DE CREACIÓN: GASTO vs. INVENTARIO + KARDEX
-    # ---------------------------------------------------------
+    def create(self, request, *args, **kwargs):
+        data = request.data.copy() if hasattr(request.data, "copy") else request.data
+        doc_type = data.get("document_type")
+        branch_id = data.get("branch_id")
+
+        if doc_type == "SIN_ESPECIFICAR" and branch_id:
+            try:
+                serie_auto = f"{int(branch_id):04d}"
+            except (ValueError, TypeError):
+                serie_auto = "0001"
+
+            ultimo = (
+                Purchase.objects.filter(
+                    document_type="SIN_ESPECIFICAR", series=serie_auto
+                )
+                .order_by("-number")
+                .first()
+            )
+            if ultimo and ultimo.number and ultimo.number.isdigit():
+                numero_auto = str(int(ultimo.number) + 1).zfill(8)
+            else:
+                numero_auto = "00000001"
+
+            data["series"] = serie_auto
+            data["number"] = numero_auto
+
+        supplier_id = data.get("supplier")
+        doc_type_final = data.get("document_type")
+        serie_final = data.get("series")
+        numero_final = data.get("number")
+
+        if supplier_id and doc_type_final and serie_final and numero_final:
+            serie_limpia = str(serie_final).strip().upper()
+            numero_limpio = str(numero_final).strip().zfill(8)
+
+            data["series"] = serie_limpia
+            data["number"] = numero_limpio
+
+            existe_duplicado = Purchase.objects.filter(
+                supplier_id=supplier_id,
+                document_type=doc_type_final,
+                series=serie_limpia,
+                number=numero_limpio,
+            ).exists()
+
+            if existe_duplicado:
+                return Response(
+                    {
+                        "error": f"Ya tienes registrada una {doc_type_final} con la serie {serie_limpia}-{numero_limpio} para este proveedor."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            serializer.data, status=status.HTTP_201_CREATED, headers=headers
+        )
+
     def perform_create(self, serializer):
         with transaction.atomic():
-            # 1. Guardar la Cabecera de Compra
             purchase = serializer.save()
 
-            # 2. Procesar cada detalle (línea de la factura)
             for detail in purchase.details.all():
-                # 🛑 CASO A: GASTO PURO (Pintura, Servicio, etc.)
-                # Si no tiene producto seleccionado O es un servicio/activo
                 if not detail.product or detail.product.product_type in [
                     "SERVICE",
                     "ASSET",
                 ]:
-                    continue  # No mueve stock, solo contabilidad
+                    continue
 
-                # ✅ CASO B: MERCADERÍA (Hot Dog, Gaseosa)
-                # Si es un producto STOCKED o CONSUMABLE
-
-                # A. Buscar o Crear Stock en esta Sede
                 stock_record, created = Stock.objects.get_or_create(
                     branch=purchase.branch,
                     product=detail.product,
                     defaults={"quantity": 0, "average_cost": 0},
                 )
 
-                # B. 🧮 CÁLCULO DE COSTO PROMEDIO PONDERADO (CPP)
                 old_total_value = stock_record.quantity * stock_record.average_cost
-                # Usamos unit_price (que suele ser sin impuestos si tu sistema es neto) o unit_value
-                # Asumimos que 'unit_value' en el detalle es el costo unitario
                 new_entry_cost = detail.unit_value
                 new_entry_total = detail.quantity * new_entry_cost
-
                 total_new_quantity = stock_record.quantity + detail.quantity
 
                 if total_new_quantity > 0:
-                    # Fórmula: (Valor Viejo + Valor Nuevo) / Cantidad Total
                     new_average_cost = (
                         old_total_value + new_entry_total
                     ) / total_new_quantity
                 else:
                     new_average_cost = new_entry_cost
 
-                # C. Actualizar Stock Físico y Costo
                 stock_record.quantity = total_new_quantity
                 stock_record.average_cost = new_average_cost
                 stock_record.save()
 
-                # D. 📝 REGISTRAR EN KARDEX
                 Kardex.objects.create(
                     branch=purchase.branch,
                     product=detail.product,
-                    date=purchase.issue_date,  # Usamos la fecha de emisión del documento
+                    date=purchase.issue_date,
                     type="IN_PURCHASE",
                     quantity=detail.quantity,
-                    # Datos Financieros del Movimiento
                     unit_cost=new_entry_cost,
                     total_cost=new_entry_total,
-                    # Snapshot (Foto del saldo después del movimiento)
                     balance_quantity=stock_record.quantity,
                     balance_unit_cost=stock_record.average_cost,
                     balance_total_cost=stock_record.quantity
@@ -599,12 +607,31 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     description=f"Compra {purchase.series}-{purchase.number} | {purchase.supplier.name}",
                 )
 
-    # ---------------------------------------------------------
-    # 🔥 LÓGICA DE ELIMINACIÓN: REVERTIR KARDEX Y STOCK
-    # ---------------------------------------------------------
+            if purchase.payment_status == "PENDING" and purchase.supplier:
+                purchase.supplier.balance += purchase.total_net_pay
+                purchase.supplier.save()
+
+            elif purchase.payment_status == "PAID" and purchase.supplier:
+                if purchase.payment_method == "CASH":
+                    metodo_texto = "en Efectivo"
+                    num_op = "PAGO-EFECTIVO"
+                else:
+                    metodo_texto = "por Transferencia"
+                    num_op = (
+                        purchase.transaction_number
+                        if purchase.transaction_number
+                        else "TRANSFERENCIA"
+                    )
+
+                SupplierTransaction.objects.create(
+                    supplier=purchase.supplier,
+                    amount=purchase.total_net_pay,
+                    transaction_number=num_op,
+                    description=f"Pago Directo {metodo_texto}: {purchase.document_type} {purchase.series}-{purchase.number}",
+                )
+
     def perform_destroy(self, instance):
         with transaction.atomic():
-            # 1. Revertir Stock y Kardex por cada detalle
             for detail in instance.details.all():
                 if detail.product and detail.product.product_type in [
                     "STOCKED",
@@ -614,18 +641,13 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         stock_record = Stock.objects.get(
                             branch=instance.branch, product=detail.product
                         )
-
-                        # Restamos la cantidad (No recalculamos costo promedio hacia atrás porque es complejo,
-                        # simplemente asumimos que sale al costo actual o mantenemos el costo.
-                        # Lo más sano es solo ajustar cantidad).
                         stock_record.quantity -= detail.quantity
                         stock_record.save()
 
-                        # Creamos un contra-movimiento en Kardex para dejar huella de la anulación
                         Kardex.objects.create(
                             branch=instance.branch,
                             product=detail.product,
-                            type="OUT_ADJUSTMENT",  # O un tipo específico ANULACION_COMPRA
+                            type="OUT_ADJUSTMENT",
                             quantity=-detail.quantity,
                             unit_cost=detail.unit_value,
                             total_cost=detail.quantity * detail.unit_value,
@@ -639,38 +661,22 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     except Stock.DoesNotExist:
                         pass
 
-            # 2. Revertir Saldo Proveedor (si estaba pagado)
             if instance.payment_status == "PAID" and instance.supplier:
                 instance.supplier.balance += instance.total_net_pay
                 instance.supplier.save()
-
-                # Registrar transacción de devolución de saldo
                 SupplierTransaction.objects.create(
                     supplier=instance.supplier,
-                    amount=instance.total_net_pay,  # Positivo porque vuelve la deuda (o el saldo a favor se anula)
-                    # Aquí la lógica depende: si ya pagué, el proveedor me debe plata (saldo a favor).
+                    amount=instance.total_net_pay,
                     transaction_number=f"REV-{instance.series}-{instance.number}",
                     description=f"Reversión por eliminación de compra {instance.series}-{instance.number}",
                 )
 
-            # 3. Borrar la compra
             instance.delete()
 
-    # ---------------------------------------------------------
-    # 🔥 LÓGICA DE EDICIÓN: REVERTIR Y RE-APLICAR
-    # ---------------------------------------------------------
     def perform_update(self, serializer):
-        """
-        Editar una compra que afecta inventario es peligroso.
-        Estrategia simplificada:
-        1. Revertir efectos de la compra vieja (restar stock).
-        2. Guardar cambios.
-        3. Aplicar efectos de la compra nueva (sumar stock, nuevo costo).
-        """
         with transaction.atomic():
             old_purchase = self.get_object()
 
-            # A. Revertir Inventario Viejo (Simplificado: Solo resta cantidad)
             for detail in old_purchase.details.all():
                 if detail.product and detail.product.product_type in [
                     "STOCKED",
@@ -682,20 +688,15 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         )
                         stk.quantity -= detail.quantity
                         stk.save()
-                        # Nota: No borramos el Kardex viejo para mantener auditoría,
-                        # pero idealmente se debería marcar como anulado.
                     except Stock.DoesNotExist:
                         pass
 
-            # B. Revertir Saldo Proveedor Viejo
-            if old_purchase.payment_status == "PAID" and old_purchase.supplier:
-                old_purchase.supplier.balance += old_purchase.total_net_pay
+            if old_purchase.payment_status == "PENDING" and old_purchase.supplier:
+                old_purchase.supplier.balance -= old_purchase.total_net_pay
                 old_purchase.supplier.save()
 
-            # C. Guardar Nueva Compra
             new_purchase = serializer.save()
 
-            # D. Aplicar Inventario Nuevo (Lógica idéntica a create)
             for detail in new_purchase.details.all():
                 if detail.product and detail.product.product_type in [
                     "STOCKED",
@@ -707,26 +708,25 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         defaults={"quantity": 0, "average_cost": 0},
                     )
 
-                    # Recálculo de CPP (Como si entrara de nuevo)
                     current_val = stock_record.quantity * stock_record.average_cost
                     entry_val = detail.quantity * detail.unit_value
                     new_qty = stock_record.quantity + detail.quantity
 
-                    if new_qty > 0:
-                        new_avg = (current_val + entry_val) / new_qty
-                    else:
-                        new_avg = detail.unit_value
+                    new_avg = (
+                        (current_val + entry_val) / new_qty
+                        if new_qty > 0
+                        else detail.unit_value
+                    )
 
                     stock_record.quantity = new_qty
                     stock_record.average_cost = new_avg
                     stock_record.save()
 
-                    # Nuevo Kardex (Corrección)
                     Kardex.objects.create(
                         branch=new_purchase.branch,
                         product=detail.product,
                         date=new_purchase.issue_date,
-                        type="IN_ADJUSTMENT",  # Marcamos como ajuste por edición
+                        type="IN_ADJUSTMENT",
                         quantity=detail.quantity,
                         unit_cost=detail.unit_value,
                         total_cost=entry_val,
@@ -738,12 +738,10 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         description=f"Edición Compra {new_purchase.series}-{new_purchase.number}",
                     )
 
-            # E. Aplicar Nuevo Saldo Proveedor
-            if new_purchase.payment_status == "PAID" and new_purchase.supplier:
-                new_purchase.supplier.balance -= new_purchase.total_net_pay
+            if new_purchase.payment_status == "PENDING" and new_purchase.supplier:
+                new_purchase.supplier.balance += new_purchase.total_net_pay
                 new_purchase.supplier.save()
 
-    # --- Acciones Extra (Choices, Bulk Pay) se mantienen igual ---
     @action(detail=False, methods=["get"])
     def choices(self, request):
         def format_opts(choices):
@@ -751,8 +749,11 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
         branch_id = request.query_params.get("branch_id")
         areas_qs = Area.objects.all()
+
+        # Opcional: Solo mostrar áreas configuradas para esta sede
         if branch_id:
-            areas_qs = areas_qs.filter(branch_id=branch_id)
+            areas_qs = areas_qs.filter(branch_configs__branch_id=branch_id).distinct()
+
         areas_options = [{"value": a.id, "label": a.name} for a in areas_qs]
 
         return Response(
@@ -766,6 +767,32 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 "areas": areas_options,
             }
         )
+
+    @action(detail=False, methods=["get"])
+    def next_sequence(self, request):
+        doc_type = request.query_params.get("document_type")
+        branch_id = request.query_params.get("branch_id")
+
+        if doc_type == "SIN_ESPECIFICAR" and branch_id:
+            try:
+                serie_auto = f"{int(branch_id):04d}"
+            except (ValueError, TypeError):
+                serie_auto = "0001"
+
+            ultimo = (
+                Purchase.objects.filter(
+                    document_type="SIN_ESPECIFICAR", series=serie_auto
+                )
+                .order_by("-number")
+                .first()
+            )
+            if ultimo and ultimo.number and ultimo.number.isdigit():
+                numero_auto = str(int(ultimo.number) + 1).zfill(8)
+            else:
+                numero_auto = "00000001"
+            return Response({"series": serie_auto, "number": numero_auto})
+
+        return Response({"series": "", "number": ""})
 
     @action(detail=False, methods=["post"])
     def bulk_pay(self, request):
@@ -816,15 +843,10 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def export_excel(self, request):
-        # 1. Filtramos las compras usando los mismos filtros de la pantalla y pre-cargamos detalles
         queryset = self.filter_queryset(self.get_queryset()).prefetch_related("details")
-
-        # 2. Creamos el archivo Excel en memoria
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Historial de Compras"
-
-        # 3. Cabeceras
         headers = [
             "Fecha Emisión",
             "Documento",
@@ -843,9 +865,7 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         ]
         ws.append(headers)
 
-        # 4. Iteramos y llenamos datos
         for p in queryset:
-            # Calculamos dinámicamente sumando las líneas
             gravado = sum(
                 float(d.total_value) for d in p.details.all() if d.tax_percentage > 0
             )
@@ -874,7 +894,6 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 ]
             )
 
-        # 5. Devolvemos el archivo como respuesta de descarga
         response = HttpResponse(
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -882,32 +901,25 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             'attachment; filename="Historial_Compras.xlsx"'
         )
         wb.save(response)
-
         return response
 
 
 # --- 5. VIEWSET DE NOTAS DE COMPRA (CRÉDITO / DÉBITO) ---
 class PurchaseNoteViewSet(viewsets.ModelViewSet):
-    serializer_class = PurchaseNoteSerializer  # <-- Este lo crearemos enseguida
+    serializer_class = PurchaseNoteSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        queryset = PurchaseNote.objects.select_related(
+        return PurchaseNote.objects.select_related(
             "purchase", "purchase__supplier"
         ).all()
-        # Puedes agregar filtros por proveedor, fecha o sucursal aquí si lo necesitas
-        return queryset
 
     def perform_create(self, serializer):
         with transaction.atomic():
-            # 1. Guardamos la Nota
             note = serializer.save(user=self.request.user)
             purchase = note.purchase
             supplier = purchase.supplier
 
-            # 2. IMPACTO FINANCIERO (Cuentas por Pagar)
-            # - Nota Crédito (07): Reduce la deuda (Monto a favor nuestro)
-            # - Nota Débito (08): Aumenta la deuda (Le debemos más al proveedor)
             if note.note_type == "07":
                 supplier.balance -= (
                     note.total_net_pay
@@ -923,7 +935,6 @@ class PurchaseNoteViewSet(viewsets.ModelViewSet):
 
             supplier.save()
 
-            # 3. IMPACTO EN INVENTARIO (Solo si affects_inventory es True)
             if note.affects_inventory:
                 for detail in note.details.all():
                     if not detail.product or detail.product.product_type not in [
@@ -938,19 +949,15 @@ class PurchaseNoteViewSet(viewsets.ModelViewSet):
                         defaults={"quantity": 0, "average_cost": 0},
                     )
 
-                    # A. Lógica para Nota de Crédito (DEVOLUCIÓN: Sale mercadería del almacén)
                     if note.note_type == "07":
-                        # Restamos la cantidad
                         stock_record.quantity -= detail.quantity
                         stock_record.save()
-
-                        # Movimiento de Kardex (Salida por Devolución a Proveedor)
                         Kardex.objects.create(
                             branch=purchase.branch,
                             product=detail.product,
                             date=note.issue_date,
-                            type="OUT_RETURN",  # Un tipo que podrías tener en tu Kardex para devoluciones
-                            quantity=-detail.quantity,  # Negativo porque sale
+                            type="OUT_RETURN",
+                            quantity=-detail.quantity,
                             unit_cost=detail.unit_value,
                             total_cost=detail.quantity * detail.unit_value,
                             balance_quantity=stock_record.quantity,
@@ -960,14 +967,10 @@ class PurchaseNoteViewSet(viewsets.ModelViewSet):
                             user=self.request.user,
                             description=f"NC {note.series}-{note.number} | Dev. a Proveedor (Ref: {purchase.series}-{purchase.number})",
                         )
-
-                    # B. Lógica para Nota de Débito (INGRESO EXTRA: Entra mercadería olvidada/extra)
                     elif note.note_type == "08":
-                        # Sumamos la cantidad y recalculamos costo promedio (igual que una compra normal)
                         old_total = stock_record.quantity * stock_record.average_cost
                         new_total = detail.quantity * detail.unit_value
                         total_qty = stock_record.quantity + detail.quantity
-
                         new_avg = (
                             (old_total + new_total) / total_qty
                             if total_qty > 0
@@ -977,8 +980,6 @@ class PurchaseNoteViewSet(viewsets.ModelViewSet):
                         stock_record.quantity = total_qty
                         stock_record.average_cost = new_avg
                         stock_record.save()
-
-                        # Movimiento de Kardex (Ingreso extra)
                         Kardex.objects.create(
                             branch=purchase.branch,
                             product=detail.product,

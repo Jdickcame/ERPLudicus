@@ -7,12 +7,25 @@ from django.utils import timezone
 
 
 class Area(models.Model):
-    name = models.CharField(max_length=100)
-    branch = models.ForeignKey(Branch, on_delete=models.CASCADE)
-    budget_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    name = models.CharField(max_length=100, unique=True)
 
     def __str__(self):
         return self.name
+
+
+# --- PRESUPUESTO BASE POR SEDE ---
+class AreaBranchBudget(models.Model):
+    area = models.ForeignKey(
+        Area, on_delete=models.CASCADE, related_name="branch_configs"
+    )
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE)
+    budget_limit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    class Meta:
+        unique_together = ("area", "branch")
+
+    def __str__(self):
+        return f"{self.area.name} - {self.branch.name} (S/ {self.budget_limit})"
 
 
 # --- 1. PROVEEDOR ---
@@ -70,6 +83,7 @@ class Purchase(models.Model):
         ("TICKET", "Ticket"),
         ("RECIBO_DE_SERVICIOS", "Recibo de Servicios"),
         ("SIN_ESPECIFICAR", "Sin especificar"),
+        ("MOVILIDAD", "Movilidad"),
     )
     PAYMENT_METHOD_CHOICES = [
         ("CASH", "Efectivo"),
@@ -177,6 +191,15 @@ class Purchase(models.Model):
     )
     transaction_number = models.CharField(max_length=50, blank=True, null=True)
 
+    # 👇 AQUÍ ESTÁ EL CANDADO DE SEGURIDAD (CLASE META)
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supplier", "document_type", "series", "number"],
+                name="unique_supplier_purchase_document",
+            )
+        ]
+
     def save(self, *args, **kwargs):
         # 1. Lógica de Periodo
         if not self.budget_period and self.issue_date:
@@ -191,8 +214,6 @@ class Purchase(models.Model):
             self.exchange_rate = Decimal("1.000")
             self.total_amount_pen = self.total
         else:
-            # 👇 AQUÍ ESTABA EL ERROR:
-            # Convertimos el tipo de cambio a Decimal antes de multiplicar
             self.total_amount_pen = self.total * Decimal(str(self.exchange_rate))
 
         super().save(*args, **kwargs)
@@ -220,7 +241,6 @@ class PurchaseDetail(models.Model):
     unit_value = models.DecimalField(max_digits=12, decimal_places=2)
     total_value = models.DecimalField(max_digits=12, decimal_places=2)
 
-    # 👇 AGREGA ESTA LÍNEA AQUÍ
     tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=18.00)
 
     def __str__(self):
@@ -230,21 +250,25 @@ class PurchaseDetail(models.Model):
 # --- 5. AJUSTE PRESUPUESTO ---
 class AreaMonthlyAdjustment(models.Model):
     area = models.ForeignKey(Area, on_delete=models.CASCADE, related_name="adjustments")
+    branch = models.ForeignKey(
+        Branch, on_delete=models.CASCADE
+    )  # 👈 Le quitamos el null=True
     year = models.PositiveIntegerField()
     month = models.PositiveIntegerField()
-
-    # El monto puede ser positivo (agregas saldo) o negativo (quitas saldo)
     amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-
     notes = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # Solo puede haber un ajuste por Área/Mes/Año (se actualiza si ya existe)
-        unique_together = ("area", "year", "month")
+        unique_together = (
+            "area",
+            "branch",
+            "year",
+            "month",
+        )  # 👈 Volvemos a encender el candado, ahora incluyendo la sede
 
     def __str__(self):
-        return f"{self.area.name} - {self.month}/{self.year}: {self.amount}"
+        return f"{self.area.name} ({self.branch.name}) - {self.month}/{self.year}: {self.amount}"
 
 
 # --- 6. LÍMITE ESPECÍFICO POR MES (Para que no se afecten entre ellos) ---
@@ -252,15 +276,23 @@ class AreaMonthlyLimit(models.Model):
     area = models.ForeignKey(
         Area, on_delete=models.CASCADE, related_name="monthly_limits"
     )
+    branch = models.ForeignKey(
+        Branch, on_delete=models.CASCADE
+    )  # 👈 Le quitamos el null=True
     year = models.PositiveIntegerField()
     month = models.PositiveIntegerField()
     amount = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
-        unique_together = ("area", "year", "month")
+        unique_together = (
+            "area",
+            "branch",
+            "year",
+            "month",
+        )  # 👈 Volvemos a encender el candado
 
     def __str__(self):
-        return f"Límite {self.area.name} {self.month}/{self.year}: {self.amount}"
+        return f"Límite {self.area.name} ({self.branch.name}) {self.month}/{self.year}: {self.amount}"
 
 
 # --- 7. NOTAS DE COMPRA (CRÉDITO / DÉBITO) ---

@@ -436,6 +436,26 @@ const NewPurchase = () => {
     }
   };
 
+  // --- BUSCAR CORRELATIVO AUTOMÁTICO PARA DOCS INTERNOS ---
+  useEffect(() => {
+    if (header.document_type === "SIN_ESPECIFICAR" && currentBranch) {
+      api
+        .get(
+          `/purchases/purchases/next_sequence/?document_type=SIN_ESPECIFICAR&branch_id=${currentBranch.id}`,
+        )
+        .then((res) => {
+          if (res.data.series && res.data.number) {
+            setHeader((prev) => ({
+              ...prev,
+              series: res.data.series,
+              number: res.data.number,
+            }));
+          }
+        })
+        .catch(console.error);
+    }
+  }, [header.document_type, currentBranch]);
+
   const handleNumberBlur = () => {
     if (header.number && header.number.length > 0) {
       const padded = header.number.padStart(8, "0");
@@ -845,12 +865,17 @@ const NewPurchase = () => {
             </label>
             <input
               type="text"
-              className="w-full border border-slate-300 p-2.5 rounded-lg text-sm text-center uppercase font-medium focus:ring-2 focus:ring-blue-100 outline-none"
+              className={`w-full border p-2.5 rounded-lg text-sm text-center uppercase font-medium focus:ring-2 focus:ring-blue-100 outline-none transition-colors ${
+                header.document_type === "SIN_ESPECIFICAR"
+                  ? "bg-slate-100 text-blue-700 border-slate-300 font-bold"
+                  : "border-slate-300 bg-white"
+              }`}
               placeholder={isNoteDocument ? "FC01" : "F001"}
               value={header.series}
               onChange={(e) =>
                 setHeader({ ...header, series: e.target.value.toUpperCase() })
               }
+              readOnly={header.document_type === "SIN_ESPECIFICAR"}
             />
           </div>
           <div className="md:col-span-3">
@@ -859,11 +884,16 @@ const NewPurchase = () => {
             </label>
             <input
               type="text"
-              className="w-full border border-slate-300 p-2.5 rounded-lg text-sm font-medium focus:ring-2 focus:ring-blue-100 outline-none"
+              className={`w-full border p-2.5 rounded-lg text-sm font-medium focus:ring-2 focus:ring-blue-100 outline-none transition-colors ${
+                header.document_type === "SIN_ESPECIFICAR"
+                  ? "bg-slate-100 text-blue-700 border-slate-300 font-bold"
+                  : "border-slate-300 bg-white"
+              }`}
               placeholder="00000123"
               value={header.number}
               onChange={(e) => setHeader({ ...header, number: e.target.value })}
               onBlur={handleNumberBlur}
+              readOnly={header.document_type === "SIN_ESPECIFICAR"}
             />
           </div>
 

@@ -1,14 +1,15 @@
 import {
-    AlertTriangle,
-    ArrowRightLeft,
-    Box,
-    DollarSign,
-    History,
-    Package,
-    Search,
+  AlertTriangle,
+  ArrowRightLeft,
+  Box,
+  DollarSign,
+  History,
+  Package,
+  Search,
+  TrendingDown,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom"; // O tu router de preferencia
+import { useNavigate } from "react-router-dom";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import { useBranch } from "../../context/BranchContext";
@@ -18,9 +19,11 @@ interface StockItem {
   product: number;
   product_name: string;
   product_sku: string;
+  product_uom: string; // Ej: NIU, KG, LTR (Nuevo backend)
   category_name: string;
   quantity: number;
-  average_cost: string; // Viene como string del DecimalField
+  min_stock: number; // Viene del nuevo backend
+  average_cost: string;
   updated_at: string;
 }
 
@@ -37,7 +40,6 @@ const InventoryPage = () => {
     if (!currentBranch) return;
     setLoading(true);
     try {
-      // Llamamos al endpoint que creamos: /api/inventory/stocks/?branch_id=X
       const res = await api.get(
         `/inventory/stocks/?branch_id=${currentBranch.id}`,
       );
@@ -54,29 +56,29 @@ const InventoryPage = () => {
   }, [currentBranch]);
 
   // --- CÁLCULOS & FILTROS ---
-
-  // 1. Filtrado en cliente (para rapidez en listas medianas)
   const filteredStocks = stocks.filter(
     (item) =>
       item.product_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.product_sku.toLowerCase().includes(searchTerm.toLowerCase()),
+      (item.product_sku &&
+        item.product_sku.toLowerCase().includes(searchTerm.toLowerCase())),
   );
 
-  // 2. Cálculo de Valor Total del Almacén
+  // Cálculo de Valor Total del Almacén
   const totalInventoryValue = filteredStocks.reduce((acc, item) => {
     return acc + item.quantity * parseFloat(item.average_cost || "0");
   }, 0);
 
-  // 3. Conteo de productos críticos
+  // Conteo inteligente de productos críticos (usando min_stock en vez de 5)
   const lowStockCount = filteredStocks.filter(
-    (i) => i.quantity > 0 && i.quantity <= 5,
+    (i) => i.quantity > 0 && i.quantity <= i.min_stock,
   ).length;
-  const outOfStockCount = filteredStocks.filter((i) => i.quantity === 0).length;
+
+  const outOfStockCount = filteredStocks.filter((i) => i.quantity <= 0).length;
 
   return (
     <div className="p-6 max-w-7xl mx-auto animate-in fade-in duration-500">
       {/* CABECERA */}
-      <div className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
             <Package className="text-blue-600" /> Inventario Físico
@@ -86,11 +88,17 @@ const InventoryPage = () => {
             <strong>{currentBranch?.name}</strong>
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <BranchSelector />
           <button
-            onClick={() => navigate("/inventory/transfers")} // Ruta futura
+            onClick={() => alert("Módulo de Ajustes próximamente")}
             className="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg font-medium hover:bg-slate-50 flex items-center gap-2 transition shadow-sm"
+          >
+            <TrendingDown size={18} /> Ajuste / Merma
+          </button>
+          <button
+            onClick={() => navigate("/inventory/transfers")}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-700 flex items-center gap-2 transition shadow-sm"
           >
             <ArrowRightLeft size={18} /> Transferencias
           </button>
@@ -99,8 +107,7 @@ const InventoryPage = () => {
 
       {/* TARJETAS DE RESUMEN (KPIs) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        {/* KPI 1: Valor Total */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4 hover:shadow-md transition">
           <div className="p-3 bg-green-50 text-green-600 rounded-lg">
             <DollarSign size={24} />
           </div>
@@ -117,8 +124,7 @@ const InventoryPage = () => {
           </div>
         </div>
 
-        {/* KPI 2: Alertas de Stock (MEJORADO) */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4 hover:shadow-md transition">
           <div className="p-3 bg-orange-50 text-orange-600 rounded-lg">
             <AlertTriangle size={24} />
           </div>
@@ -127,7 +133,6 @@ const InventoryPage = () => {
               Alertas de Stock
             </p>
             <div className="flex gap-4">
-              {/* Columna Stock Bajo */}
               <div>
                 <p className="text-xl font-black text-orange-500">
                   {lowStockCount}
@@ -136,12 +141,10 @@ const InventoryPage = () => {
                   Bajos
                 </p>
               </div>
-              {/* Columna Agotados (Aquí usamos la variable que faltaba) */}
               <div className="border-l pl-4 border-slate-100">
                 <p className="text-xl font-black text-red-600">
                   {outOfStockCount}
-                </p>{" "}
-                {/* 👈 AQUÍ SE USA */}
+                </p>
                 <p className="text-[10px] text-slate-400 font-bold uppercase">
                   Agotados
                 </p>
@@ -150,20 +153,19 @@ const InventoryPage = () => {
           </div>
         </div>
 
-        {/* KPI 3: Total Items */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4 hover:shadow-md transition">
           <div className="p-3 bg-blue-50 text-blue-600 rounded-lg">
             <Box size={24} />
           </div>
           <div>
             <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">
-              Total SKUs
+              Total SKUs Activos
             </p>
             <div className="flex items-baseline gap-2">
               <p className="text-2xl font-black text-slate-800">
                 {filteredStocks.length}
               </p>
-              <span className="text-xs text-slate-400">items</span>
+              <span className="text-xs text-slate-400">ítems</span>
             </div>
           </div>
         </div>
@@ -176,7 +178,7 @@ const InventoryPage = () => {
           <input
             type="text"
             placeholder="Buscar por nombre, SKU..."
-            className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-100 outline-none"
+            className="w-full pl-10 pr-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-100 outline-none transition"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
@@ -184,34 +186,40 @@ const InventoryPage = () => {
       </div>
 
       {/* TABLA DE INVENTARIO */}
-      <div className="bg-white rounded-b-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-b-xl border border-slate-200 shadow-sm overflow-hidden mb-8">
         <table className="w-full text-sm text-left">
-          <thead className="bg-slate-50 text-slate-600 font-semibold uppercase text-xs">
+          <thead className="bg-slate-50 text-slate-600 font-semibold uppercase text-[10px] tracking-wider">
             <tr>
               <th className="p-4">Producto</th>
               <th className="p-4">Categoría</th>
-              <th className="p-4 text-center">Stock</th>
+              <th className="p-4 text-center">Stock Físico</th>
               <th className="p-4 text-right">Costo Prom.</th>
-              <th className="p-4 text-right text-blue-700">Valor Total</th>
-              <th className="p-4 text-center">Acciones</th>
+              <th className="p-4 text-right text-slate-700">Valor Total</th>
+              <th className="p-4 text-center">Auditoría</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading ? (
               <tr>
-                <td colSpan={6} className="p-8 text-center text-slate-500">
+                <td colSpan={6} className="p-12 text-center text-slate-500">
                   Cargando inventario...
                 </td>
               </tr>
             ) : filteredStocks.length === 0 ? (
               <tr>
-                <td colSpan={6} className="p-8 text-center text-slate-400">
-                  No se encontraron productos en esta sede.
+                <td colSpan={6} className="p-12 text-center text-slate-400">
+                  <div className="flex flex-col items-center justify-center">
+                    <Package size={48} className="mb-3 opacity-30" />
+                    <p>No se encontraron productos en esta sede.</p>
+                  </div>
                 </td>
               </tr>
             ) : (
               filteredStocks.map((item) => {
-                const totalVal = item.quantity * parseFloat(item.average_cost);
+                const totalVal =
+                  item.quantity * parseFloat(item.average_cost || "0");
+                const isCritical = item.quantity <= item.min_stock;
+                const isOutOfStock = item.quantity <= 0;
 
                 return (
                   <tr
@@ -222,32 +230,41 @@ const InventoryPage = () => {
                       <div className="font-bold text-slate-800">
                         {item.product_name}
                       </div>
-                      <div className="text-xs text-slate-400 font-mono">
-                        {item.product_sku}
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-xs text-slate-400 font-mono">
+                          {item.product_sku || "S/N"}
+                        </span>
+                        <span className="text-[10px] text-slate-300">|</span>
+                        <span className="text-[10px] text-slate-500 font-medium">
+                          {item.product_uom || "UND"}
+                        </span>
                       </div>
                     </td>
                     <td className="p-4 text-slate-600">
-                      <span className="bg-slate-100 px-2 py-1 rounded text-xs font-medium">
-                        {item.category_name}
+                      <span className="bg-slate-100 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider border border-slate-200">
+                        {item.category_name || "General"}
                       </span>
                     </td>
                     <td className="p-4 text-center">
                       <span
-                        className={`px-3 py-1 rounded-full font-bold text-xs ${
-                          item.quantity === 0
-                            ? "bg-red-100 text-red-700"
-                            : item.quantity <= 5
-                              ? "bg-orange-100 text-orange-700"
-                              : "bg-green-100 text-green-700"
+                        className={`px-3 py-1 rounded-full font-bold text-xs inline-flex items-center gap-1.5 ${
+                          isOutOfStock
+                            ? "bg-red-50 text-red-700 border border-red-200"
+                            : isCritical
+                              ? "bg-orange-50 text-orange-700 border border-orange-200"
+                              : "bg-green-50 text-green-700 border border-green-200"
                         }`}
                       >
+                        {isCritical && !isOutOfStock && (
+                          <AlertTriangle size={12} />
+                        )}
                         {item.quantity}
                       </span>
                     </td>
-                    <td className="p-4 text-right text-slate-600 font-mono">
-                      S/ {parseFloat(item.average_cost).toFixed(2)}
+                    <td className="p-4 text-right text-slate-600 font-medium">
+                      S/ {parseFloat(item.average_cost || "0").toFixed(2)}
                     </td>
-                    <td className="p-4 text-right font-bold text-blue-700 font-mono bg-blue-50/30">
+                    <td className="p-4 text-right font-bold text-slate-800">
                       S/ {totalVal.toFixed(2)}
                     </td>
                     <td className="p-4 text-center">
@@ -255,10 +272,9 @@ const InventoryPage = () => {
                         onClick={() =>
                           navigate(`/inventory/kardex/${item.product}`)
                         }
-                        className="text-slate-400 hover:text-blue-600 transition-colors p-2 hover:bg-blue-50 rounded-full"
-                        title="Ver Kardex (Historial)"
+                        className="text-blue-600 hover:text-blue-800 transition-colors p-1.5 hover:bg-blue-50 rounded bg-blue-50/50 inline-flex items-center gap-1.5 text-xs font-medium"
                       >
-                        <History size={18} />
+                        <History size={14} /> Kardex
                       </button>
                     </td>
                   </tr>
