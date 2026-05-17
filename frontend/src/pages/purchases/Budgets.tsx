@@ -1,18 +1,17 @@
 import {
-  AlertTriangle,
   ArrowRightCircle,
   Calendar,
   Edit2,
   PlusCircle,
   Save,
-  Target,
+  Target
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import { useBranch } from "../../context/BranchContext";
 
-// 👇 FALTA ESTA IMPORTACIÓN (Asegúrate de que la ruta sea correcta)
+// 👇 ASEGÚRATE DE QUE LA RUTA SEA CORRECTA
 import AreaExpensesTable from "../../components/budgets/AreaExpensesTable";
 
 interface BudgetStatus {
@@ -38,7 +37,6 @@ const Budgets = () => {
   const [stats, setStats] = useState<BudgetStatus[]>([]);
   const [availableAreas, setAvailableAreas] = useState<Option[]>([]);
 
-  // 👇 ESTADO DEL FILTRO DE MES (Por defecto el mes actual)
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -46,8 +44,6 @@ const Budgets = () => {
 
   const [editingArea, setEditingArea] = useState<string | number | null>(null);
   const [newLimit, setNewLimit] = useState("");
-
-  // ✅ CORREGIDO: Se usan corchetes [], NO llaves {}
   const [selectedArea, setSelectedArea] = useState<any | null>(null);
 
   const loadData = async () => {
@@ -132,6 +128,7 @@ const Budgets = () => {
       await api.post("/purchases/budgets/set_limit/", {
         area_id: areaValue,
         amount: newLimit,
+        branch_id: currentBranch.id, // 👈 Se asegura de enviar la sede actual
         month: selectedMonth,
       });
 
@@ -144,11 +141,12 @@ const Budgets = () => {
     }
   };
 
-  // 👇 SI HAY UN ÁREA SELECCIONADA, MOSTRAMOS LA TABLA DE DETALLES
+  // 👇 RENDERIZADO DE LA TABLA DE GASTOS
   if (selectedArea) {
     return (
       <div className="p-6 max-w-6xl mx-auto">
         <AreaExpensesTable
+          // Le pasamos todo el objeto (selectedArea) por si tu componente usa "label"
           area={selectedArea}
           month={selectedMonth}
           onBack={() => setSelectedArea(null)}
@@ -173,7 +171,7 @@ const Budgets = () => {
           </p>
         </div>
 
-        {/* 👇 FILTRO DE MES */}
+        {/* FILTRO DE MES */}
         <div className="flex items-center gap-2 bg-white p-2 rounded shadow-sm border border-slate-200">
           <Calendar size={18} className="text-slate-400" />
           <span className="text-sm font-semibold text-slate-600">Periodo:</span>
@@ -212,7 +210,7 @@ const Budgets = () => {
                     : ""
                 }`}
               >
-                {/* CABECERA DE TARJETA */}
+                {/* CABECERA DE TARJETA CON PRESUPUESTO */}
                 <div className="flex justify-between items-start mb-4 relative z-10">
                   <div>
                     <h3 className="font-bold text-lg text-slate-800 group-hover:text-blue-700 transition-colors">
@@ -237,7 +235,7 @@ const Budgets = () => {
                       />
                       <button
                         onClick={(e) => handleSave(e, areaOpt.value)}
-                        className="bg-green-600 text-white p-1.5 rounded"
+                        className="bg-green-600 text-white p-1.5 rounded hover:bg-green-700"
                       >
                         <Save size={16} />
                       </button>
@@ -262,7 +260,7 @@ const Budgets = () => {
 
                       {stat.extra_budget !== 0 && (
                         <span
-                          className={`text-[10px] font-medium px-1 rounded ${stat.extra_budget > 0 ? "text-green-600 bg-green-50" : "text-red-500 bg-red-50"}`}
+                          className={`text-[10px] font-medium px-1 rounded mt-1 ${stat.extra_budget > 0 ? "text-green-600 bg-green-50" : "text-red-500 bg-red-50"}`}
                         >
                           Base: {stat.base_limit}{" "}
                           {stat.extra_budget > 0 ? "+" : "-"}{" "}
@@ -308,41 +306,62 @@ const Budgets = () => {
                       <button
                         onClick={(e) => handleRollover(e, stat)}
                         className="text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 px-2 py-1 rounded-full flex items-center gap-1 transition border border-indigo-100 shadow-sm font-semibold"
-                        title="Transferir sobrante al mes siguiente"
                       >
                         Cerrar Mes <ArrowRightCircle size={12} />
                       </button>
                     )}
                   </div>
                 </div>
-
-                {stat.is_negative && (
-                  <div className="mt-3 bg-red-50 border border-red-100 text-red-700 px-3 py-2 rounded text-xs flex items-center gap-2">
-                    <AlertTriangle size={14} /> <strong>Excedido</strong>
-                  </div>
-                )}
               </div>
             );
           }
 
-          // TARJETA VACÍA (Sin presupuesto)
+          // 👇 AQUÍ ESTÁ LA SOLUCIÓN AL PROBLEMA DE "TARJETA VACÍA" 👇
           return (
             <div
               key={areaOpt.value}
-              className="bg-slate-50 p-5 rounded-lg border border-dashed border-slate-300 flex flex-col justify-center items-center text-center"
+              className="bg-slate-50 p-5 rounded-lg border border-dashed border-slate-300 flex flex-col justify-center items-center text-center transition-all"
             >
-              <h3 className="font-bold text-slate-600">{areaOpt.label}</h3>
-              <p className="text-xs text-slate-400 mb-4">Sin límite</p>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setEditingArea(areaOpt.value);
-                  setNewLimit("");
-                }}
-                className="bg-white text-blue-600 border border-blue-200 px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2"
-              >
-                <PlusCircle size={16} /> Definir Límite
-              </button>
+              <h3 className="font-bold text-slate-600 text-lg mb-1">
+                {areaOpt.label}
+              </h3>
+
+              {isEditing ? (
+                // SI ESTÁ EDITANDO, MOSTRAMOS EL INPUT
+                <div className="mt-3 flex gap-2 bg-white p-2 rounded-lg border shadow-sm w-full max-w-[200px] animate-in zoom-in-95">
+                  <input
+                    type="number"
+                    className="w-full text-center text-sm outline-none font-bold text-slate-700"
+                    placeholder="S/ 0.00"
+                    value={newLimit}
+                    onChange={(e) => setNewLimit(e.target.value)}
+                    autoFocus
+                  />
+                  <button
+                    onClick={(e) => handleSave(e, areaOpt.value)}
+                    className="bg-green-600 hover:bg-green-700 text-white p-2 rounded transition"
+                  >
+                    <Save size={16} />
+                  </button>
+                </div>
+              ) : (
+                // SI NO ESTÁ EDITANDO, MOSTRAMOS EL BOTÓN
+                <>
+                  <p className="text-xs text-slate-400 mb-4">
+                    Sin presupuesto asignado
+                  </p>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setEditingArea(areaOpt.value);
+                      setNewLimit("");
+                    }}
+                    className="bg-white text-blue-600 border border-blue-200 px-5 py-2.5 rounded-full text-sm font-bold flex items-center gap-2 hover:bg-blue-50 transition shadow-sm"
+                  >
+                    <PlusCircle size={16} /> Definir Límite
+                  </button>
+                </>
+              )}
             </div>
           );
         })}

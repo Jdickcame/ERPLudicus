@@ -167,7 +167,7 @@ class InventoryAdjustmentDetailSerializer(serializers.ModelSerializer):
 
 
 class InventoryAdjustmentSerializer(serializers.ModelSerializer):
-    details = InventoryAdjustmentDetailSerializer(many=True, read_only=True)
+    details = InventoryAdjustmentDetailSerializer(many=True)
     branch_name = serializers.CharField(source="branch.name", read_only=True)
     created_by_name = serializers.CharField(
         source="created_by.username", read_only=True
@@ -188,6 +188,21 @@ class InventoryAdjustmentSerializer(serializers.ModelSerializer):
             "created_at",
             "details",
         ]
+        read_only_fields = ["created_by", "created_at"]
+
+    def create(self, validated_data):
+        details_data = validated_data.pop("details")
+
+        # Creamos la cabecera (InventoryAdjustment)
+        adjustment = InventoryAdjustment.objects.create(**validated_data)
+
+        # Creamos los detalles iterando la lista que nos mandó React
+        for detail in details_data:
+            from .models import InventoryAdjustmentDetail  # Importación segura
+
+            InventoryAdjustmentDetail.objects.create(adjustment=adjustment, **detail)
+
+        return adjustment
 
 
 # --- 6. TRASLADOS DE ALMACÉN ---
@@ -210,7 +225,9 @@ class TransferDetailSerializer(serializers.ModelSerializer):
 
 
 class TransferSerializer(serializers.ModelSerializer):
-    details = TransferDetailSerializer(many=True, read_only=True)
+    # 1. Le quitamos el read_only=True para que Django ACEPTE los productos que manda React
+    details = TransferDetailSerializer(many=True)
+
     origin_branch_name = serializers.CharField(
         source="origin_branch.name", read_only=True
     )
@@ -239,6 +256,23 @@ class TransferSerializer(serializers.ModelSerializer):
             "created_at",
             "details",
         ]
+        # 2. ESTO SOLUCIONA EL ERROR 400 (Django ya no te exigirá estos datos en el POST)
+        read_only_fields = ["created_by", "received_by", "status", "created_at"]
+
+    # 3. Agregamos la función create() para procesar el carrito de productos (Igual que en los ajustes)
+    def create(self, validated_data):
+        details_data = validated_data.pop("details")
+
+        # Creamos la cabecera del Traslado
+        transfer = Transfer.objects.create(**validated_data)
+
+        # Recorremos el carrito y guardamos cada producto adentro de este Traslado
+        from .models import TransferDetail
+
+        for detail in details_data:
+            TransferDetail.objects.create(transfer=transfer, **detail)
+
+        return transfer
 
 
 # --- 7. KARDEX ---

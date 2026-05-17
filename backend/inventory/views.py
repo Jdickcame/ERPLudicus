@@ -5,6 +5,7 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -29,6 +30,12 @@ from .serializers import (
     TagSerializer,
     TransferSerializer,
 )
+
+
+class DynamicPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"  # Permite cambiar a 20, 50, etc.
+    max_page_size = 1000
 
 
 # --- 1. CATEGORÍAS Y ETIQUETAS ---
@@ -58,6 +65,20 @@ class ProductViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         # Usamos el Soft Delete que programamos en el modelo
         instance.delete()
+
+    @action(detail=False, methods=["get"])
+    def choices(self, request):
+        from .models import Product  # Asegúrate de que el modelo esté importado
+
+        def format_opts(choices):
+            return [{"value": k, "label": v} for k, v in choices]
+
+        return Response(
+            {
+                "product_types": format_opts(Product.PRODUCT_TYPES),
+                "uom_choices": format_opts(Product.UOM_CHOICES),
+            }
+        )
 
 
 class ProductRecipeViewSet(viewsets.ModelViewSet):
@@ -93,11 +114,9 @@ class StockViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 class KardexViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = KardexSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = [
-        "get",
-        "head",
-        "options",
-    ]  # 🔥 REGLA: El Kardex SOLO se lee, NUNCA se edita desde la API directamente
+    http_method_names = ["get", "head", "options"]
+
+    pagination_class = DynamicPagination
 
     def get_queryset(self):
         queryset = (
@@ -105,9 +124,24 @@ class KardexViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             .order_by("-date")
             .select_related("product", "branch", "user")
         )
+
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
+
+        product_id = self.request.query_params.get("product")
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+
+        # 👇 NUEVO: FILTROS DE RANGO DE FECHAS 👇
+        start_date = self.request.query_params.get("start_date")
+        end_date = self.request.query_params.get("end_date")
+
+        if start_date:
+            queryset = queryset.filter(date__gte=f"{start_date} 00:00:00")
+        if end_date:
+            queryset = queryset.filter(date__lte=f"{end_date} 23:59:59")
+
         return queryset
 
 
@@ -231,14 +265,15 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = TransferSerializer
     permission_classes = [IsAuthenticated]
 
-    # ... (La creación de traslados pendientes la dejamos por defecto para que React envíe el JSON) ...
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def receive(self, request, pk=None):
         """
         Punto final donde la sede de destino dice: "Ya me llegó la mercadería".
-        Aquí es donde restamos a Trujillo y le sumamos a Chiclayo.
+        Aquí es donde restamos a origen y le sumamos a destino.
         """
         transfer = self.get_object()
 
@@ -256,12 +291,17 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             stock_origin = Stock.objects.select_for_update().get(
                 branch=transfer.origin_branch, product=detail.product
             )
+
+            # 👇 CORRECCIÓN: Devolvemos un Response 400 en vez de un raise ValueError 👇
             if stock_origin.quantity < detail.quantity:
-                raise ValueError(
-                    f"Trujillo ya no tiene stock suficiente de {detail.product.name} para completar este traslado."
+                return Response(
+                    {
+                        "error": f"La sede origen ya no tiene stock suficiente de '{detail.product.name}' para completar este traslado (Stock actual: {stock_origin.quantity})."
+                    },
+                    status=400,
                 )
 
-            costo_traslado = stock_origin.average_cost  # Se va con el costo de Trujillo
+            costo_traslado = stock_origin.average_cost  # Se va con el costo de origen
             stock_origin.quantity -= detail.quantity
             stock_origin.save()
 
@@ -287,11 +327,15 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 defaults={"quantity": 0, "average_cost": costo_traslado},
             )
 
-            # Recalcular Promedio en Chiclayo
+            # Recalcular Promedio en Destino
             total_old = stock_dest.quantity * stock_dest.average_cost
             total_new = detail.quantity * costo_traslado
             stock_dest.quantity += detail.quantity
-            stock_dest.average_cost = (total_old + total_new) / stock_dest.quantity
+
+            # Evitar división por cero por seguridad matemática
+            if stock_dest.quantity > 0:
+                stock_dest.average_cost = (total_old + total_new) / stock_dest.quantity
+
             stock_dest.save()
 
             # Kardex Destino

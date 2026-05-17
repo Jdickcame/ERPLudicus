@@ -6,7 +6,17 @@ import requests
 from core.mixins import BranchAccessMixin
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, ExpressionWrapper, F, FloatField, Min, Sum
+from django.db.models import (
+    Case,
+    Count,
+    ExpressionWrapper,
+    F,
+    FloatField,
+    Min,
+    Sum,
+    When,
+)
+from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
 from inventory.models import Kardex, Stock
@@ -59,6 +69,21 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(branch_configs__branch_id=branch_id).distinct()
 
         return queryset
+
+    def perform_create(self, serializer):
+        # 1. Guardamos el Área (Nombre global)
+        area = serializer.save()
+
+        # 2. Si desde React nos envían una sede y un límite, creamos la conexión
+        branch_id = self.request.data.get("branch_id")
+        budget_limit = self.request.data.get("budget_limit", 0)
+
+        if branch_id:
+            from .models import AreaBranchBudget
+
+            AreaBranchBudget.objects.create(
+                area=area, branch_id=branch_id, budget_limit=budget_limit
+            )
 
     # 🛡️ ACCIÓN STATUS: Calcular gastos POR SEDE usando la nueva tabla
     @action(detail=False, methods=["get"])
@@ -115,13 +140,21 @@ class AreaBudgetViewSet(viewsets.ModelViewSet):
             )
 
             # Sumamos total_value + IGV de cada línea
-            cost_with_tax = ExpressionWrapper(
-                F("total_value") * (1.0 + F("tax_percentage") / 100.0),
+            cost_in_soles = ExpressionWrapper(
+                Case(
+                    When(
+                        purchase__currency="USD",
+                        then=(F("total_value") * (1.0 + F("tax_percentage") / 100.0))
+                        * Coalesce(F("purchase__exchange_rate"), 1.0),
+                    ),
+                    default=F("total_value") * (1.0 + F("tax_percentage") / 100.0),
+                    output_field=FloatField(),
+                ),
                 output_field=FloatField(),
             )
 
             spent = (
-                monthly_details.annotate(line_cost=cost_with_tax).aggregate(
+                monthly_details.annotate(line_cost=cost_in_soles).aggregate(
                     s=Sum("line_cost")
                 )["s"]
                 or 0
@@ -495,7 +528,7 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
-        return queryset
+        return queryset.distinct()
 
     def create(self, request, *args, **kwargs):
         data = request.data.copy() if hasattr(request.data, "copy") else request.data

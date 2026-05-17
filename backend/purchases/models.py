@@ -100,6 +100,7 @@ class Purchase(models.Model):
     IGV_RATES = (
         (0.18, "18%"),
         (0.10, "10%"),
+        (0.105, "10.5%"),
         (0.00, "0% (Exonerado/Inafecto)"),
     )
     CURRENCY_CHOICES = [

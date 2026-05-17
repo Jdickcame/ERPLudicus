@@ -13,51 +13,65 @@ interface Area {
   name: string;
 }
 
+interface Choice {
+  value: string;
+  label: string;
+}
+
 const ProductForm = () => {
   const navigate = useNavigate();
   const [categories, setCategories] = useState<Category[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
+
+  // 👇 Nuevos estados para los datos dinámicos
+  const [productTypes, setProductTypes] = useState<Choice[]>([]);
+  const [uomChoices, setUomChoices] = useState<Choice[]>([]);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // Estado del formulario ampliado
   const [formData, setFormData] = useState({
     name: "",
     sku: "",
     area: "",
     category: "",
     price: "",
-    product_type: "STOCKED",
-    unit_of_measure: "NIU",
+    product_type: "STOCKED", // Default
+    unit_of_measure: "NIU", // Default
     is_sellable: true,
     is_purchasable: true,
     manage_stock: true,
   });
 
-  // Cargar Categorías y Áreas al montar
   useEffect(() => {
     // Cargar Categorías
     api
       .get("/inventory/categories/")
       .then((res) => setCategories(res.data.results || res.data))
-      .catch((err) => console.error("Error cargando categorías:", err));
+      .catch((err) => console.error("Error categorías:", err));
 
-    // Cargar Áreas (Asegúrate de que la ruta coincida con tu endpoint en purchases)
-    // Usamos el endpoint que configuraste en AreaBudgetViewSet
+    // Cargar Áreas
     api
-      .get("/purchases/areas/")
+      .get("/purchases/budgets/")
       .then((res) => setAreas(res.data.results || res.data))
-      .catch((err) => console.error("Error cargando áreas:", err));
+      .catch((err) => console.error("Error áreas:", err));
+
+    // 👇 NUEVO: Cargar Opciones Dinámicas (Tipos y Unidades)
+    api
+      .get("/inventory/products/choices/")
+      .then((res) => {
+        setProductTypes(res.data.product_types);
+        setUomChoices(res.data.uom_choices);
+      })
+      .catch((err) => console.error("Error opciones dinámicas:", err));
   }, []);
 
-  // Manejador inteligente de cambios
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>,
   ) => {
     const { name, value, type } = e.target;
     let newValue: any = value;
 
-    // Manejar checkboxes
     if (type === "checkbox") {
       newValue = (e.target as HTMLInputElement).checked;
     }
@@ -65,18 +79,31 @@ const ProductForm = () => {
     setFormData((prev) => {
       const updated = { ...prev, [name]: newValue };
 
-      // Lógica automática de UX: Si es Servicio, no controla stock
+      // Lógica automática de UX según el Tipo de Producto
       if (name === "product_type") {
         if (value === "SERVICE") {
           updated.manage_stock = false;
           updated.unit_of_measure = "ZZ"; // Mutuamente Exclusivo
+          updated.is_sellable = true;
+          updated.is_purchasable = true;
         } else if (value === "FINISHED") {
-          updated.is_purchasable = false; // No se compra, se cocina
+          updated.is_purchasable = false;
           updated.manage_stock = true;
+          updated.is_sellable = true;
+        } else if (value === "CONSUMABLE") {
+          updated.manage_stock = true;
+          updated.is_purchasable = true;
+          updated.is_sellable = false; // Insumos no se venden
+          updated.price = "0";
         } else {
           updated.manage_stock = true;
           updated.is_purchasable = true;
+          updated.is_sellable = true;
         }
+      }
+
+      if (name === "is_sellable" && !newValue) {
+        updated.price = "0";
       }
 
       return updated;
@@ -94,22 +121,19 @@ const ProductForm = () => {
         category: parseInt(formData.category),
         area: formData.area ? parseInt(formData.area) : null,
         price: parseFloat(formData.price || "0"),
-        // Si el SKU está vacío, lo mandamos null para que el backend lo auto-genere
         sku: formData.sku.trim() === "" ? null : formData.sku.trim(),
       };
 
       await api.post("/inventory/products/", payload);
-      // Regresamos al catálogo de productos
       navigate("/inventory/products");
     } catch (err: any) {
       console.error(err);
       if (err.response?.data?.sku) {
-        setError(
-          "El código SKU ya existe. Intenta con otro o déjalo en blanco.",
-        );
+        setError("El código SKU ya existe.");
       } else {
+        // Mejoramos el manejo de errores para ver qué falló exactamente
         setError(
-          "Error al guardar el producto. Revisa los datos obligatorios.",
+          JSON.stringify(err.response?.data) || "Error al guardar el producto.",
         );
       }
     } finally {
@@ -119,15 +143,13 @@ const ProductForm = () => {
 
   return (
     <div className="max-w-4xl mx-auto p-6 animate-in fade-in duration-300">
-      {/* CABECERA */}
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
             <Box className="text-blue-600" /> Nuevo Producto
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Registra un ítem en el catálogo maestro y configura sus reglas de
-            negocio.
+            Registra un ítem en el catálogo maestro.
           </p>
         </div>
         <button
@@ -140,14 +162,14 @@ const ProductForm = () => {
 
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 md:p-8">
         {error && (
-          <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg flex items-center gap-3 text-sm border border-red-200">
-            <AlertCircle size={20} className="shrink-0" />
-            <span className="font-medium">{error}</span>
+          <div className="mb-6 p-4 bg-red-50 text-red-700 rounded-lg flex items-start gap-3 text-sm border border-red-200">
+            <AlertCircle size={18} className="shrink-0 mt-0.5" />
+            <span className="font-medium break-all">{error}</span>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-8">
-          {/* SECCIÓN 1: Información Básica */}
+          {/* SECCIÓN 1 */}
           <div>
             <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2 border-b pb-2">
               <Info size={18} className="text-slate-400" /> Información General
@@ -162,7 +184,6 @@ const ProductForm = () => {
                   name="name"
                   required
                   className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition"
-                  placeholder="Ej: Pan con Pollo Clásico"
                   value={formData.name}
                   onChange={handleChange}
                 />
@@ -183,26 +204,36 @@ const ProductForm = () => {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
+                <label
+                  className={`block text-sm font-medium mb-1 ${formData.is_sellable ? "text-slate-700" : "text-slate-400"}`}
+                >
                   Precio Base de Venta (S/){" "}
-                  <span className="text-red-500">*</span>
+                  {formData.is_sellable && (
+                    <span className="text-red-500">*</span>
+                  )}
                 </label>
                 <input
                   type="number"
                   name="price"
                   step="0.01"
                   min="0"
-                  required
-                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition"
+                  required={formData.is_sellable}
+                  disabled={!formData.is_sellable}
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none transition disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed"
                   placeholder="0.00"
                   value={formData.price}
                   onChange={handleChange}
                 />
+                {!formData.is_sellable && (
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    No aplicable para este tipo de ítem.
+                  </p>
+                )}
               </div>
             </div>
           </div>
 
-          {/* SECCIÓN 2: Clasificación */}
+          {/* SECCIÓN 2 */}
           <div>
             <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2 border-b pb-2">
               <Settings2 size={18} className="text-slate-400" /> Clasificación y
@@ -248,6 +279,7 @@ const ProductForm = () => {
                 </select>
               </div>
 
+              {/* 👇 SELECT DINÁMICO DE TIPOS 👇 */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Tipo de Producto <span className="text-red-500">*</span>
@@ -259,19 +291,15 @@ const ProductForm = () => {
                   value={formData.product_type}
                   onChange={handleChange}
                 >
-                  <option value="STOCKED">
-                    Almacenable (Se compra y vende)
-                  </option>
-                  <option value="CONSUMABLE">
-                    Insumo (Solo se compra/consume)
-                  </option>
-                  <option value="FINISHED">
-                    Producto Terminado (Tiene Receta)
-                  </option>
-                  <option value="SERVICE">Servicio (Intangible)</option>
+                  {productTypes.map((pt) => (
+                    <option key={pt.value} value={pt.value}>
+                      {pt.label}
+                    </option>
+                  ))}
                 </select>
               </div>
 
+              {/* 👇 SELECT DINÁMICO DE UNIDADES DE MEDIDA 👇 */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Unidad de Medida <span className="text-red-500">*</span>
@@ -284,19 +312,17 @@ const ProductForm = () => {
                   value={formData.unit_of_measure}
                   onChange={handleChange}
                 >
-                  <option value="NIU">Unidades (NIU)</option>
-                  <option value="KG">Kilogramos (KG)</option>
-                  <option value="LTR">Litros (LTR)</option>
-                  <option value="MTR">Metros (MTR)</option>
-                  <option value="GLN">Galones (GLN)</option>
-                  <option value="BX">Cajas (BX)</option>
-                  <option value="ZZ">Servicio (ZZ)</option>
+                  {uomChoices.map((uom) => (
+                    <option key={uom.value} value={uom.value}>
+                      {uom.label}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
           </div>
 
-          {/* SECCIÓN 3: Comportamientos (Switches) */}
+          {/* SECCIÓN 3: Comportamientos */}
           <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
             <h4 className="text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">
               Reglas de Negocio
@@ -308,9 +334,12 @@ const ProductForm = () => {
                   name="is_sellable"
                   checked={formData.is_sellable}
                   onChange={handleChange}
-                  className="w-5 h-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                  disabled={formData.product_type === "CONSUMABLE"}
+                  className="w-5 h-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500 disabled:opacity-50"
                 />
-                <span className="text-sm font-medium text-slate-700">
+                <span
+                  className={`text-sm font-medium ${formData.product_type === "CONSUMABLE" ? "text-slate-400" : "text-slate-700"}`}
+                >
                   Disponible para Venta
                 </span>
               </label>

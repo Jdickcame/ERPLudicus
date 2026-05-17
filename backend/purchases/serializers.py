@@ -15,16 +15,14 @@ from .models import (
 
 
 class AreaBudgetSerializer(serializers.ModelSerializer):
-    # Mapeamos los campos nuevos a los nombres viejos que espera tu Frontend
-    area_label = serializers.CharField(source="name")
-    monthly_limit = serializers.DecimalField(
-        source="budget_limit", max_digits=12, decimal_places=2
-    )
+    # Ya que 'Area' ahora es global, solo enviamos su ID y su Nombre al frontend.
+    # Mantenemos 'area_label' por si tu frontend lo sigue usando en algún lado.
+    area_label = serializers.CharField(source="name", read_only=True)
 
     class Meta:
         model = Area
-        # Incluimos tanto los nombres nuevos como los viejos para compatibilidad total
-        fields = ["id", "name", "area_label", "branch", "budget_limit", "monthly_limit"]
+        # 💥 Quitamos 'branch', 'budget_limit' y 'monthly_limit' porque ya no viven aquí.
+        fields = ["id", "name", "area_label"]
 
 
 # --- 1. Categorías de Gasto ---
@@ -142,6 +140,8 @@ class PurchaseSerializer(serializers.ModelSerializer):
     retention_amount = serializers.SerializerMethodField()
     detraction_amount = serializers.SerializerMethodField()
 
+    area_total = serializers.SerializerMethodField()
+
     class Meta:
         model = Purchase
         fields = [
@@ -182,8 +182,34 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "payment_method",
             "gravado",
             "no_gravado",
+            "area_total",
         ]
         read_only_fields = ["user", "registration_date"]
+
+    def get_area_total(self, obj):
+        # Leemos si React nos está pidiendo filtrar por un área específica
+        request = self.context.get("request")
+        if request and "details__area" in request.query_params:
+            area_id = str(request.query_params.get("details__area"))
+            total_area = 0
+
+            # Recorremos los productos de la factura y sumamos SOLO los del área seleccionada
+            for detail in obj.details.all():
+                if str(detail.area_id) == area_id:
+                    # 1. Obtenemos el subtotal (base imponible)
+                    base_value = float(detail.total_value or 0)
+
+                    # 2. Obtenemos el porcentaje de impuesto (si no tiene, asumimos 0)
+                    tax_perc = float(getattr(detail, "tax_percentage", 0) or 0)
+
+                    # 3. Calculamos el Total Real (Subtotal + IGV)
+                    line_total = base_value * (1.0 + (tax_perc / 100.0))
+
+                    total_area += line_total
+
+            return total_area
+
+        return None
 
     # 👇 NUEVAS FUNCIONES PARA CALCULAR LÍNEA POR LÍNEA
     def get_gravado(self, obj):

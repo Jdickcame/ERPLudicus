@@ -1,6 +1,7 @@
 import {
   AlertCircle,
-  Banknote, // 👈 Importamos el icono de billete
+  Banknote,
+  ChefHat, // 👈 Importamos el icono de billete
   ChevronDown,
   ChevronRight,
   CreditCard,
@@ -236,6 +237,13 @@ const Sidebar = () => {
                 to="/inventory/new"
                 icon={PlusCircle}
                 label="Nuevo Producto"
+              />
+            )}
+            {check("inventory", "create") && (
+              <SidebarItem
+                to="/inventory/recipes"
+                icon={ChefHat}
+                label="Gestor de Recetas"
               />
             )}
           </SidebarGroup>

@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
+import { useBranch } from "../../context/BranchContext";
 import PurchaseDetailModal from "../purchases/PurchaseDetailModal";
 
 // 👇 1. AGREGAR 'month' A LA INTERFAZ
@@ -20,6 +21,7 @@ interface AreaExpensesTableProps {
 
 // 👇 2. RECIBIR LA PROPIEDAD
 const AreaExpensesTable = ({ area, month, onBack }: AreaExpensesTableProps) => {
+  const { currentBranch } = useBranch();
   const [expenses, setExpenses] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -43,7 +45,7 @@ const AreaExpensesTable = ({ area, month, onBack }: AreaExpensesTableProps) => {
         // 👇 4. AGREGAR LOS FILTROS A LA URL
         // Nota: Usamos budget_period__year y __month para filtrar exactamente ese periodo
         const response = await api.get(
-          `/purchases/purchases/?area=${area.value}&page=${page}&ordering=-issue_date&budget_period__year=${year}&budget_period__month=${monthNum}`,
+          `/purchases/purchases/?branch_id=${currentBranch?.id}&details__area=${area.value}&page=${page}&ordering=-issue_date&budget_period__year=${year}&budget_period__month=${monthNum}`,
         );
 
         let dataList = [];
@@ -133,54 +135,82 @@ const AreaExpensesTable = ({ area, month, onBack }: AreaExpensesTableProps) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {expenses.map((expense) => (
-                  <tr key={expense.id} className="hover:bg-slate-50 transition">
-                    <td className="p-4 text-slate-600 flex items-center gap-2">
-                      <Calendar size={14} className="text-slate-400" />{" "}
-                      {expense.issue_date}
-                    </td>
-                    {/* Visualizar el periodo real grabado */}
-                    <td className="p-4 text-blue-600 font-medium text-xs">
-                      {expense.budget_period
-                        ? expense.budget_period.slice(0, 7)
-                        : "-"}
-                    </td>
-                    <td className="p-4 font-medium text-slate-800">
-                      {expense.supplier_name}
-                    </td>
-                    <td className="p-4 text-slate-500">
-                      <div className="flex items-center gap-1">
-                        <FileText size={14} />
-                        {expense.series}-{expense.number}
-                      </div>
-                    </td>
-                    <td className="p-4 text-center">
-                      <span
-                        className={`px-2 py-1 rounded-full text-[10px] font-bold ${
-                          expense.payment_status === "PAID"
-                            ? "bg-green-100 text-green-700"
-                            : "bg-red-100 text-red-700"
-                        }`}
-                      >
-                        {expense.payment_status === "PAID"
-                          ? "PAGADO"
-                          : "PENDIENTE"}
-                      </span>
-                    </td>
-                    <td className="p-4 text-right font-bold text-slate-800">
-                      S/ {parseFloat(expense.total).toFixed(2)}
-                    </td>
-                    <td className="p-4 text-center">
-                      <button
-                        onClick={() => setSelectedPurchaseId(expense.id)}
-                        className="text-blue-600 hover:bg-blue-50 p-2 rounded-full transition"
-                        title="Ver Detalle"
-                      >
-                        <Eye size={18} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {expenses.map((expense) => {
+                  // 👇 Lógica de Conversión Visual
+                  const isUSD = expense.currency === "USD";
+                  const exRate = parseFloat(expense.exchange_rate || "1");
+                  const rawTotalStr =
+                    expense.area_total !== null &&
+                    expense.area_total !== undefined
+                      ? expense.area_total
+                      : expense.total;
+                  const rawTotal = parseFloat(rawTotalStr || "0");
+                  const totalSoles = isUSD ? rawTotal * exRate : rawTotal;
+
+                  return (
+                    <tr
+                      key={expense.id}
+                      className="hover:bg-slate-50 transition"
+                    >
+                      <td className="p-4 text-slate-600 flex items-center gap-2">
+                        <Calendar size={14} className="text-slate-400" />{" "}
+                        {expense.issue_date}
+                      </td>
+                      <td className="p-4 text-blue-600 font-medium text-xs">
+                        {expense.budget_period
+                          ? expense.budget_period.slice(0, 7)
+                          : "-"}
+                      </td>
+                      <td className="p-4 font-medium text-slate-800">
+                        {expense.supplier_name}
+                      </td>
+                      <td className="p-4 text-slate-500">
+                        <div className="flex items-center gap-1">
+                          <FileText size={14} />
+                          {expense.series}-{expense.number}
+                        </div>
+                      </td>
+                      <td className="p-4 text-center">
+                        <span
+                          className={`px-2 py-1 rounded-full text-[10px] font-bold ${
+                            expense.payment_status === "PAID"
+                              ? "bg-green-100 text-green-700"
+                              : "bg-red-100 text-red-700"
+                          }`}
+                        >
+                          {expense.payment_status === "PAID"
+                            ? "PAGADO"
+                            : "PENDIENTE"}
+                        </span>
+                      </td>
+
+                      {/* 👇 NUEVA CELDA MULTIMONEDA 👇 */}
+                      <td className="p-4 text-right">
+                        <div className="font-bold text-slate-800">
+                          S/ {totalSoles.toFixed(2)}
+                        </div>
+                        {isUSD && (
+                          <div
+                            className="text-[10px] text-slate-400 mt-0.5"
+                            title={`Tipo de Cambio: ${exRate}`}
+                          >
+                            ($ {rawTotal.toFixed(2)})
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="p-4 text-center">
+                        <button
+                          onClick={() => setSelectedPurchaseId(expense.id)}
+                          className="text-blue-600 hover:bg-blue-50 p-2 rounded-full transition"
+                          title="Ver Detalle"
+                        >
+                          <Eye size={18} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
 
@@ -218,6 +248,7 @@ const AreaExpensesTable = ({ area, month, onBack }: AreaExpensesTableProps) => {
         <PurchaseDetailModal
           purchaseId={selectedPurchaseId}
           onClose={() => setSelectedPurchaseId(null)}
+          filterAreaId={area.value}
         />
       )}
     </div>

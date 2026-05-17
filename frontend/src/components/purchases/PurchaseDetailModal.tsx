@@ -1,22 +1,22 @@
 import { FileText, Loader2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import api from "../../api/axios";
 
 interface PurchaseDetailModalProps {
   purchaseId: number | null;
-  // 👇 NUEVO: Le pasamos el 'type' para que sepa si busca una Compra o una Nota
   type?: "PURCHASES" | "NOTES";
   onClose: () => void;
+  filterAreaId?: string | number; // 👈 Nuestra clave para filtrar
 }
 
 interface PurchaseDetail {
   id: number;
   supplier_name: string;
   supplier_ruc?: string;
-  supplier_tax_id?: string; // Para compatibilidad
+  supplier_tax_id?: string;
   issue_date: string;
   document_type?: string;
-  note_type?: string; // Si es nota
+  note_type?: string;
   series: string;
   number: string;
   observation?: string;
@@ -41,8 +41,10 @@ interface PurchaseDetail {
     id: number;
     product_name: string;
     description?: string;
-    category_name?: string; // 👈 NUEVO
-    area_name?: string; // 👈 NUEVO
+    category_name?: string;
+    area_name?: string;
+    area?: number | string; // Para asegurar compatibilidad del filtro
+    area_id?: number | string; // Para asegurar compatibilidad del filtro
     quantity: number;
     unit_value: number;
     total_value: number;
@@ -52,8 +54,9 @@ interface PurchaseDetail {
 
 const PurchaseDetailModal = ({
   purchaseId,
-  type = "PURCHASES", // Por defecto asume que es una compra normal
+  type = "PURCHASES",
   onClose,
+  filterAreaId,
 }: PurchaseDetailModalProps) => {
   const [purchase, setPurchase] = useState<PurchaseDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,7 +66,6 @@ const PurchaseDetailModal = ({
       const fetchDetail = async () => {
         setLoading(true);
         try {
-          // 👇 DETERMINAMOS A QUÉ RUTA LLAMAR SEGÚN EL TIPO
           const endpoint =
             type === "PURCHASES"
               ? `/purchases/purchases/${purchaseId}/`
@@ -81,11 +83,72 @@ const PurchaseDetailModal = ({
     }
   }, [purchaseId, type]);
 
+  // 👇 1. LISTA FILTRADA DE PRODUCTOS MÁGICA 👇
+  const displayedDetails = useMemo(() => {
+    if (!purchase?.details) return [];
+    if (!filterAreaId) return purchase.details; // Si no hay filtro, muestra todo
+
+    return purchase.details.filter(
+      (item) =>
+        String(item.area) === String(filterAreaId) ||
+        String(item.area_id) === String(filterAreaId),
+    );
+  }, [purchase, filterAreaId]);
+
+  // 👇 2. CÁLCULO DE TOTALES DINÁMICOS 👇
+  const { subtotalStr, taxStr, totalStr, netPayStr, contableStr } =
+    useMemo(() => {
+      if (!purchase)
+        return {
+          subtotalStr: "0.00",
+          taxStr: "0.00",
+          totalStr: "0.00",
+          netPayStr: "0.00",
+          contableStr: "0.00",
+        };
+
+      // Si NO estamos filtrando, mostramos los totales originales del documento
+      if (!filterAreaId) {
+        return {
+          subtotalStr: Number(purchase.subtotal || 0).toFixed(2),
+          taxStr: Number(purchase.tax_amount || 0).toFixed(2),
+          totalStr: Number(purchase.total || 0).toFixed(2),
+          netPayStr: Number(
+            purchase.total_net_pay || purchase.total || 0,
+          ).toFixed(2),
+          contableStr: Number(purchase.total_amount_pen || 0).toFixed(2),
+        };
+      }
+
+      // Si SÍ estamos filtrando, sumamos solo los items visibles
+      let calcSubtotal = 0;
+      let calcTax = 0;
+
+      displayedDetails.forEach((item) => {
+        const itemBase = Number(item.total_value || 0);
+        const itemTax = itemBase * (Number(item.tax_percentage || 0) / 100);
+        calcSubtotal += itemBase;
+        calcTax += itemTax;
+      });
+
+      const calcTotal = calcSubtotal + calcTax;
+      const exRate = Number(purchase.exchange_rate || 1);
+      const calcContable =
+        purchase.currency === "USD" ? calcTotal * exRate : calcTotal;
+
+      return {
+        subtotalStr: calcSubtotal.toFixed(2),
+        taxStr: calcTax.toFixed(2),
+        totalStr: calcTotal.toFixed(2),
+        netPayStr: calcTotal.toFixed(2), // Ignoramos retenciones/detracciones al filtrar
+        contableStr: calcContable.toFixed(2),
+      };
+    }, [purchase, filterAreaId, displayedDetails]);
+
   if (!purchaseId) return null;
 
   const symbol = purchase?.currency === "USD" ? "$" : "S/";
 
-  // Mapeo del nombre del documento para la cabecera
   let documentName = purchase?.document_type || "DOCUMENTO";
   if (type === "NOTES") {
     documentName =
@@ -105,6 +168,11 @@ const PurchaseDetailModal = ({
                 }
               />
               {type === "NOTES" ? "Detalle de Nota" : "Detalle de Compra"}
+              {filterAreaId && (
+                <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                  Filtrado por Área
+                </span>
+              )}
             </h2>
             {purchase && (
               <p className="text-sm text-slate-500 mt-1 font-medium">
@@ -155,7 +223,6 @@ const PurchaseDetailModal = ({
                     {purchase.issue_date}
                   </p>
                 </div>
-
                 <div>
                   <p className="text-slate-500 font-medium text-xs uppercase">
                     Moneda / TC
@@ -169,7 +236,6 @@ const PurchaseDetailModal = ({
                     </span>
                   </p>
                 </div>
-
                 {type === "PURCHASES" && (
                   <div>
                     <p className="text-slate-500 font-medium text-xs uppercase">
@@ -184,7 +250,7 @@ const PurchaseDetailModal = ({
                 )}
               </div>
 
-              {/* TABLA DE PRODUCTOS (AHORA CON ÁREA Y CATEGORÍA) */}
+              {/* TABLA DE PRODUCTOS (LISTA FILTRADA) */}
               <div>
                 <div className="border rounded-lg overflow-hidden">
                   <table className="w-full text-sm text-left">
@@ -199,75 +265,88 @@ const PurchaseDetailModal = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {purchase.details?.map((item) => (
-                        <tr key={item.id} className="hover:bg-slate-50">
-                          <td className="p-3 font-medium text-slate-700">
-                            {item.product_name || item.description}
-                          </td>
-                          {/* 👇 NUEVO: Muestra el área y categoría guardados */}
-                          <td className="p-3 text-[11px] leading-tight">
-                            <span className="block text-slate-600 font-bold">
-                              {item.category_name || "Sin Categoría"}
-                            </span>
-                            <span className="block text-slate-400">
-                              {item.area_name || "Sin Área"}
-                            </span>
-                          </td>
-                          <td className="p-3 text-center font-medium">
-                            {Number(item.quantity)}
-                          </td>
-                          <td className="p-3 text-right">
-                            {symbol} {Number(item.unit_value).toFixed(2)}
-                          </td>
-                          <td className="p-3 text-center">
-                            {Number(item.tax_percentage) > 0 ? (
-                              <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                {Number(item.tax_percentage)}%
-                              </span>
-                            ) : (
-                              <span className="text-slate-400 text-[10px]">
-                                EXO
-                              </span>
-                            )}
-                          </td>
-                          <td className="p-3 text-right font-bold text-blue-700">
-                            {symbol}{" "}
-                            {Number(
-                              item.total_value *
-                                (1 + Number(item.tax_percentage) / 100),
-                            ).toFixed(2)}
+                      {displayedDetails.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={6}
+                            className="p-4 text-center text-slate-400"
+                          >
+                            No hay productos registrados para esta área en este
+                            documento.
                           </td>
                         </tr>
-                      ))}
+                      ) : (
+                        displayedDetails.map((item) => (
+                          <tr key={item.id} className="hover:bg-slate-50">
+                            <td className="p-3 font-medium text-slate-700">
+                              {item.product_name || item.description}
+                            </td>
+                            <td className="p-3 text-[11px] leading-tight">
+                              <span className="block text-slate-600 font-bold">
+                                {item.category_name || "Sin Categoría"}
+                              </span>
+                              <span className="block text-slate-400">
+                                {item.area_name || "Sin Área"}
+                              </span>
+                            </td>
+                            <td className="p-3 text-center font-medium">
+                              {Number(item.quantity)}
+                            </td>
+                            <td className="p-3 text-right">
+                              {symbol} {Number(item.unit_value).toFixed(2)}
+                            </td>
+                            <td className="p-3 text-center">
+                              {Number(item.tax_percentage) > 0 ? (
+                                <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                  {Number(item.tax_percentage)}%
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 text-[10px]">
+                                  EXO
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-3 text-right font-bold text-blue-700">
+                              {symbol}{" "}
+                              {Number(
+                                item.total_value *
+                                  (1 + Number(item.tax_percentage) / 100),
+                              ).toFixed(2)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
 
-              {/* SECCIÓN DE TOTALES */}
+              {/* SECCIÓN DE TOTALES DINÁMICOS */}
               <div className="flex flex-col items-end pt-2">
                 <div className="w-64 space-y-1">
                   <div className="flex justify-between text-sm text-slate-500">
                     <span>Subtotal Base:</span>
                     <span>
-                      {symbol} {Number(purchase.subtotal || 0).toFixed(2)}
+                      {symbol} {subtotalStr}
                     </span>
                   </div>
                   <div className="flex justify-between text-sm text-slate-500">
                     <span>IGV:</span>
                     <span>
-                      {symbol} {Number(purchase.tax_amount || 0).toFixed(2)}
+                      {symbol} {taxStr}
                     </span>
                   </div>
                   <div className="flex justify-between text-base font-bold text-slate-700 border-t border-slate-200 pt-1 mt-1">
-                    <span>Total Documento:</span>
+                    <span>Total {filterAreaId ? "Área" : "Documento"}:</span>
                     <span>
-                      {symbol} {Number(purchase.total).toFixed(2)}
+                      {symbol} {totalStr}
                     </span>
                   </div>
                 </div>
 
-                {type === "PURCHASES" &&
+                {/* Mostrar Ajustes Tributarios SOLO si vemos el documento completo */}
+                {!filterAreaId &&
+                  type === "PURCHASES" &&
                   (Number(purchase.perception_amount) > 0 ||
                     Number(purchase.retention_amount) > 0 ||
                     Number(purchase.detraction_amount) > 0) && (
@@ -308,13 +387,14 @@ const PurchaseDetailModal = ({
                 <div className="w-64 mt-3 bg-slate-800 text-white p-3 rounded-lg shadow-lg">
                   <div className="flex justify-between items-center">
                     <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-                      {type === "NOTES" ? "Total Nota" : "Neto a Pagar"}
+                      {filterAreaId
+                        ? "Total Área"
+                        : type === "NOTES"
+                          ? "Total Nota"
+                          : "Neto a Pagar"}
                     </span>
                     <span className="text-xl font-black">
-                      {symbol}{" "}
-                      {Number(purchase.total_net_pay || purchase.total).toFixed(
-                        2,
-                      )}
+                      {symbol} {netPayStr}
                     </span>
                   </div>
                   {purchase.currency === "USD" && purchase.total_amount_pen && (
@@ -323,7 +403,7 @@ const PurchaseDetailModal = ({
                         Contable (Soles):
                       </span>
                       <span className="text-sm font-bold text-orange-400">
-                        S/ {Number(purchase.total_amount_pen).toFixed(2)}
+                        S/ {contableStr}
                       </span>
                     </div>
                   )}

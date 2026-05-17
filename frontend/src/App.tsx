@@ -1,13 +1,16 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/layout/Layout";
-import Dashboard from "./pages/Dashboard";
+import Dashboard from "./pages/dashboard/Dashboard";
 import Login from "./pages/Login";
 
 // Inventario
 import InventoryPage from "./pages/inventory/InventoryPage"; // Inventario Físico (Stock + Valorizado)
-import KardexPage from "./pages/inventory/KardexPage"; // Historial Kardex
+import NewAdjustment from "./pages/inventory/NewAdjustment";
 import ProductForm from "./pages/inventory/ProductForm";
+import ProductKardex from "./pages/inventory/ProductKardex";
 import Products from "./pages/inventory/Products";
+import RecipeManager from "./pages/inventory/RecipeManager";
+import TransfersPage from "./pages/inventory/TransfersPage";
 
 // Compras
 import AccountsPayable from "./pages/purchases/AccountsPayable";
@@ -120,10 +123,21 @@ function App() {
                 {/* 2. Gestión de Stock Físico (Por Sede) */}
                 <Route path="/inventory" element={<InventoryPage />} />
 
-                {/* 3. Kardex e Historial */}
+                <Route path="/inventory/recipes" element={<RecipeManager />} />
+
                 <Route
-                  path="/inventory/kardex/:productId"
-                  element={<KardexPage />}
+                  path="/inventory/adjustments/new"
+                  element={<NewAdjustment />}
+                />
+
+                <Route
+                  path="/inventory/kardex/:id"
+                  element={<ProductKardex />}
+                />
+
+                <Route
+                  path="/inventory/transfers"
+                  element={<TransfersPage />}
                 />
               </Route>
 
