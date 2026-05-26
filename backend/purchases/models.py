@@ -50,17 +50,6 @@ class ExpenseCategory(models.Model):
         return self.name
 
 
-class SupplierTransaction(models.Model):
-    supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE)
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
-    transaction_number = models.CharField(max_length=50)  # N° Operación
-    created_at = models.DateTimeField(auto_now_add=True)
-    description = models.CharField(max_length=255, blank=True)
-
-    def __str__(self):
-        return f"{self.transaction_number} - {self.amount}"
-
-
 # --- 3. COMPRA (CABECERA) ---
 class Purchase(models.Model):
     COST_TYPE_CHOICES = [
@@ -84,14 +73,6 @@ class Purchase(models.Model):
         ("RECIBO_DE_SERVICIOS", "Recibo de Servicios"),
         ("SIN_ESPECIFICAR", "Sin especificar"),
         ("MOVILIDAD", "Movilidad"),
-    )
-    PAYMENT_METHOD_CHOICES = [
-        ("CASH", "Efectivo"),
-        ("TRANSFER", "Transferencia"),
-    ]
-    PAYMENT_CONDITIONS = (
-        ("CASH", "Contado"),
-        ("CREDIT", "Crédito"),
     )
     PAYMENT_STATUS = (
         ("PAID", "Pagado"),
@@ -126,14 +107,6 @@ class Purchase(models.Model):
         choices=COST_TYPE_CHOICES,
         default="CF",  # Por defecto Costo Variable
         verbose_name="Tipo de Costo",
-    )
-
-    # Metodo de pago
-    payment_method = models.CharField(
-        max_length=20,
-        choices=PAYMENT_METHOD_CHOICES,
-        default="TRANSFER",  # Por defecto Transferencia
-        verbose_name="Método de Pago",
     )
 
     # Fechas
@@ -184,13 +157,9 @@ class Purchase(models.Model):
     total_net_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
 
     # Pagos
-    payment_condition = models.CharField(
-        max_length=20, choices=PAYMENT_CONDITIONS, default="CASH"
-    )
     payment_status = models.CharField(
-        max_length=20, choices=PAYMENT_STATUS, default="PAID"
+        max_length=20, choices=PAYMENT_STATUS, default="PENDING"
     )
-    transaction_number = models.CharField(max_length=50, blank=True, null=True)
 
     # 👇 AQUÍ ESTÁ EL CANDADO DE SEGURIDAD (CLASE META)
     class Meta:

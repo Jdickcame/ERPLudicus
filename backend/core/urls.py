@@ -42,5 +42,6 @@ urlpatterns = [
     path("api/purchases/", include("purchases.urls")),  # Ruta de Compras
     path("api/reports/", include("reports.urls")),  # Ruta reportes
     path("api/branches/", include("branches.urls")),  # Ruta sedes
+    path("api/treasury/", include("treasury.urls")),
     path("api/", include(router.urls)),
 ]

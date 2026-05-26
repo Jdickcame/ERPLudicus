@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     "branches",
     "core",
     "cash",
+    "treasury",
 ]
 
 AUTH_USER_MODEL = "users.User"

@@ -1,7 +1,7 @@
 import {
   AlertCircle,
   Banknote,
-  ChefHat, // 👈 Importamos el icono de billete
+  ChefHat,
   ChevronDown,
   ChevronRight,
   CreditCard,
@@ -16,6 +16,7 @@ import {
   Target,
   Truck,
   Users,
+  Wallet,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -47,7 +48,10 @@ const SidebarItem = ({ to, icon: Icon, label, exact = false }: any) => {
 
 const SidebarGroup = ({ label, icon: Icon, children, basePath }: any) => {
   const location = useLocation();
+
+  // Ya no necesitamos Array, volvimos a la simplicidad
   const isActiveGroup = location.pathname.startsWith(basePath);
+
   const [isOpen, setIsOpen] = useState(isActiveGroup);
 
   useEffect(() => {
@@ -102,16 +106,20 @@ const Sidebar = () => {
   };
 
   const showSalesGroup =
-    check("sales", "pos") || check("sales", "list") || check("cash"); // Agregamos check("cash")
+    check("sales", "pos") || check("sales", "list") || check("cash");
+
   const showInventoryGroup =
     check("inventory", "list") || check("inventory", "create");
+
+  // 1. Logística y Compras (Ya no incluye finanzas)
   const showPurchasesGroup =
     check("purchases", "create") ||
     check("purchases", "list") ||
-    check("purchases", "payable") ||
-    check("purchases", "balances") ||
-    check("purchases", "suppliers") ||
-    check("purchases", "budgets");
+    check("purchases", "suppliers");
+
+  // 2. Tesorería
+  const showTreasuryGroup =
+    check("purchases", "payable") || check("purchases", "budgets");
 
   return (
     <aside className="w-64 bg-slate-900 text-white flex flex-col shadow-2xl z-20 h-screen sticky top-0">
@@ -146,7 +154,7 @@ const Sidebar = () => {
         </div>
 
         <p className="px-3 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-          Módulos
+          Módulos Operativos
         </p>
 
         {showSalesGroup && (
@@ -162,8 +170,6 @@ const Sidebar = () => {
                 exact={true}
               />
             )}
-
-            {/* 👇 AQUÍ ESTÁ EL NUEVO ITEM DE CAJA 👇 */}
             {check("cash") && (
               <SidebarItem to="/cash" icon={Banknote} label="Gestión de Caja" />
             )}
@@ -172,7 +178,7 @@ const Sidebar = () => {
 
         {showPurchasesGroup && (
           <SidebarGroup
-            label="Compras"
+            label="Logística & Compras"
             icon={ShoppingBag}
             basePath="/purchases"
           >
@@ -187,29 +193,15 @@ const Sidebar = () => {
               <SidebarItem
                 to="/purchases"
                 icon={LayoutList}
-                label="Historial"
+                label="Historial Compras"
                 exact={true}
-              />
-            )}
-            {check("purchases", "payable") && (
-              <SidebarItem
-                to="/purchases/payable"
-                icon={AlertCircle}
-                label="Cuentas por Pagar"
               />
             )}
             {check("purchases", "suppliers") && (
               <SidebarItem
                 to="/purchases/suppliers"
                 icon={Truck}
-                label="Proveedores"
-              />
-            )}
-            {check("purchases", "budgets") && (
-              <SidebarItem
-                to="/purchases/budgets"
-                icon={Target}
-                label="Control Presupuestal"
+                label="Directorio Proveedores"
               />
             )}
           </SidebarGroup>
@@ -244,6 +236,35 @@ const Sidebar = () => {
                 to="/inventory/recipes"
                 icon={ChefHat}
                 label="Gestor de Recetas"
+              />
+            )}
+          </SidebarGroup>
+        )}
+
+        <div className="mt-6 mb-2">
+          <p className="px-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+            Finanzas
+          </p>
+        </div>
+
+        {showTreasuryGroup && (
+          <SidebarGroup
+            label="Tesorería"
+            icon={Wallet}
+            basePath="/treasury" // 👈 Solo necesita esta base
+          >
+            {check("purchases", "payable") && (
+              <SidebarItem
+                to="/treasury/payables" // 👈 RUTA CORRECTA
+                icon={AlertCircle}
+                label="Cuentas por Pagar"
+              />
+            )}
+            {check("purchases", "budgets") && (
+              <SidebarItem
+                to="/treasury/budgets" // 👈 RUTA CORRECTA
+                icon={Target}
+                label="Presupuestos"
               />
             )}
           </SidebarGroup>

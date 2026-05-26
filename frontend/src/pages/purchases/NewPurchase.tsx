@@ -75,17 +75,8 @@ const NewPurchase = () => {
   // --- OPCIONES DINÁMICAS ---
   const [areaOptions, setAreaOptions] = useState<Option[]>([]);
   const [docTypeOptions, setDocTypeOptions] = useState<Option[]>([]);
-  const [paymentConditionOptions, setPaymentConditionOptions] = useState<
-    Option[]
-  >([]);
-  const [paymentStatusOptions, setPaymentStatusOptions] = useState<Option[]>(
-    [],
-  );
   const [igvOptions, setIgvOptions] = useState<Option[]>([]);
   const [costTypeOptions, setCostTypeOptions] = useState<Option[]>([]);
-  const [paymentMethodOptions, setPaymentMethodOptions] = useState<Option[]>(
-    [],
-  );
 
   // --- ESTADOS DEL PROVEEDOR ---
   const [rucSearch, setRucSearch] = useState("");
@@ -111,19 +102,16 @@ const NewPurchase = () => {
   // --- BUSQUEDA ---
   const [isSearchingSupplier, setIsSearchingSupplier] = useState(false);
 
-  // --- CABECERA ---
+  // --- CABECERA LIMPIA ---
   const [header, setHeader] = useState({
     document_type: "FACTURA",
     series: "",
     number: "",
     issue_date: new Date().toISOString().split("T")[0],
     budget_period: new Date().toISOString().slice(0, 7),
-    due_date: new Date().toISOString().split("T")[0],
+    due_date: new Date().toISOString().split("T")[0], // Fecha de vencimiento (Deuda)
     tax_rate: 0.18,
-    payment_condition: "CASH",
-    payment_status: "PAID",
     cost_type: "CF",
-    payment_method: "TRANSFER",
   });
 
   const isNoteDocument =
@@ -160,7 +148,7 @@ const NewPurchase = () => {
             api.get("/purchases/purchases/choices/"),
             header.budget_period
               ? api.get(
-                  `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
+                  `/treasury/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
                 )
               : Promise.resolve({ data: [] }),
           ]);
@@ -178,11 +166,8 @@ const NewPurchase = () => {
 
         setAreaOptions(choicesRes.data.areas || []);
         setDocTypeOptions(choicesRes.data.document_types || []);
-        setPaymentConditionOptions(choicesRes.data.payment_conditions || []);
-        setPaymentStatusOptions(choicesRes.data.payment_status || []);
         setIgvOptions(choicesRes.data.igv_rates || []);
         setCostTypeOptions(choicesRes.data.cost_types || []);
-        setPaymentMethodOptions(choicesRes.data.payment_methods || []);
       } catch (error) {
         console.error("Error cargando datos", error);
       }
@@ -231,11 +216,10 @@ const NewPurchase = () => {
     }
   }, [isNoteDocument, supplierId, currentBranch]);
 
-  // --- LÓGICA DE PROVEEDORES MEJORADA ---
+  // --- LÓGICA DE PROVEEDORES ---
   const handleSearchRuc = async () => {
     if (!rucSearch) return;
 
-    // 1. Búsqueda rápida en la memoria local (tus 400 proveedores)
     const localFound = suppliersList.find((s) => s.tax_id === rucSearch);
     if (localFound) {
       setSupplierId(localFound.id);
@@ -244,7 +228,6 @@ const NewPurchase = () => {
       return;
     }
 
-    // 2. Si no está local, buscamos en SUNAT/RENIEC mediante nuestro Backend
     setIsSearchingSupplier(true);
     try {
       const response = await api.get(
@@ -252,16 +235,12 @@ const NewPurchase = () => {
       );
       const supplierData = response.data;
 
-      // Autocompletamos con la data real de SUNAT
       setSupplierId(supplierData.id);
       setSupplierName(supplierData.name);
       setIsNewSupplier(false);
-
-      // Lo agregamos a la lista local para no tener que volver a buscarlo si borramos
       setSuppliersList((prev) => [...prev, supplierData]);
     } catch (error) {
       console.error("No encontrado en SUNAT/RENIEC", error);
-      // 3. Si falla (RUC inválido o API caída), pasamos a creación manual
       setSupplierId(null);
       setSupplierName("");
       setIsNewSupplier(true);
@@ -436,7 +415,7 @@ const NewPurchase = () => {
     }
   };
 
-  // --- BUSCAR CORRELATIVO AUTOMÁTICO PARA DOCS INTERNOS ---
+  // --- BUSCAR CORRELATIVO AUTOMÁTICO ---
   useEffect(() => {
     if (header.document_type === "SIN_ESPECIFICAR" && currentBranch) {
       api
@@ -473,10 +452,7 @@ const NewPurchase = () => {
       budget_period: new Date().toISOString().slice(0, 7),
       due_date: new Date().toISOString().split("T")[0],
       tax_rate: 0.18,
-      payment_condition: "CASH",
-      payment_status: "PAID",
       cost_type: "CF",
-      payment_method: "TRANSFER",
     });
     setDetails([
       {
@@ -565,8 +541,6 @@ const NewPurchase = () => {
           ...header,
           supplier: finalSupplierId,
           branch_id: currentBranch.id,
-          due_date:
-            header.payment_status === "PENDING" ? header.due_date : null,
           budget_period: `${header.budget_period}-01`,
           currency: currency,
           exchange_rate: currency === "PEN" ? "1.000" : exchangeRate,
@@ -580,7 +554,7 @@ const NewPurchase = () => {
           details: detailsPayload,
         };
         await api.post("/purchases/purchases/", payload);
-        alert("¡Compra registrada exitosamente! 🚀");
+        alert("¡Factura registrada en Cuentas por Pagar exitosamente! 🚀");
       }
 
       resetForm();
@@ -592,7 +566,6 @@ const NewPurchase = () => {
     }
   };
 
-  // 🔥 NUEVA VERSIÓN: PANEL ELEGANTE DE PRESUPUESTO
   const renderBudgetAlerts = () => {
     if (isNoteDocument) return null;
 
@@ -703,7 +676,6 @@ const NewPurchase = () => {
                 onKeyDown={(e) => e.key === "Enter" && handleSearchRuc()}
                 readOnly={supplierId !== null && !isNewSupplier}
               />
-              {/* 👇 BOTÓN ACTUALIZADO 👇 */}
               <button
                 onClick={handleSearchRuc}
                 disabled={supplierId !== null || isSearchingSupplier}
@@ -836,7 +808,7 @@ const NewPurchase = () => {
           {!isNoteDocument && (
             <div className="md:col-span-2">
               <label className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-1 block">
-                Periodo
+                Periodo Gasto
               </label>
               <input
                 type="month"
@@ -983,7 +955,8 @@ const NewPurchase = () => {
 
           {!isNoteDocument && (
             <>
-              <div className="md:col-span-3">
+              {/* 👇 NUEVOS CAMPOS REORGANIZADOS: Solo Tipo Costo y Vencimiento */}
+              <div className="md:col-span-4">
                 <SearchableSelect
                   label="Tipo de Costo"
                   options={costTypeOptions}
@@ -993,67 +966,18 @@ const NewPurchase = () => {
                   }
                 />
               </div>
-              <div className="md:col-span-3">
-                <SearchableSelect
-                  label="Método de Pago"
-                  options={paymentMethodOptions}
-                  value={header.payment_method}
-                  onChange={(val) =>
-                    setHeader({ ...header, payment_method: val as string })
+              <div className="md:col-span-4">
+                <label className="text-xs font-bold text-red-500 flex items-center gap-1 uppercase tracking-wider mb-1">
+                  <Calendar size={14} /> Fecha Vencimiento
+                </label>
+                <input
+                  type="date"
+                  className="w-full border border-red-200 bg-red-50 p-2.5 rounded-lg text-sm font-bold text-red-700 focus:ring-2 focus:ring-red-100 outline-none"
+                  value={header.due_date}
+                  onChange={(e) =>
+                    setHeader({ ...header, due_date: e.target.value })
                   }
                 />
-              </div>
-              <div className="md:col-span-3">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
-                  Condición
-                </label>
-                <select
-                  className="w-full border border-slate-300 p-2.5 rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none"
-                  value={header.payment_condition}
-                  onChange={(e) =>
-                    setHeader({ ...header, payment_condition: e.target.value })
-                  }
-                >
-                  {paymentConditionOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="md:col-span-3">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
-                  Estado Pago
-                </label>
-                <select
-                  className={`w-full border p-2.5 rounded-lg text-sm font-bold outline-none ${header.payment_status === "PENDING" ? "text-red-600 bg-red-50 border-red-200" : "text-green-600 bg-green-50 border-green-200"}`}
-                  value={header.payment_status}
-                  onChange={(e) =>
-                    setHeader({ ...header, payment_status: e.target.value })
-                  }
-                >
-                  {paymentStatusOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                {header.payment_status === "PENDING" && (
-                  <div className="mt-2 flex items-center gap-2 bg-red-50 p-2 rounded border border-red-100">
-                    <Calendar size={14} className="text-red-500" />
-                    <span className="text-xs text-red-500 font-bold">
-                      Vence:
-                    </span>
-                    <input
-                      type="date"
-                      className="bg-transparent text-xs font-bold text-red-700 outline-none w-full"
-                      value={header.due_date}
-                      onChange={(e) =>
-                        setHeader({ ...header, due_date: e.target.value })
-                      }
-                    />
-                  </div>
-                )}
               </div>
             </>
           )}
@@ -1247,12 +1171,11 @@ const NewPurchase = () => {
       </div>
 
       {/* --- TOTALES Y ENVÍO --- */}
-      {/* ✅ CORRECCIÓN 3: Flex Items Start para que los cuadros se alineen por arriba */}
       <div className="flex flex-col md:flex-row justify-between items-start gap-6">
-        {/* ZONA DE ALERTAS (AHORA ES UN PANEL ORDENADO A LA IZQUIERDA) */}
+        {/* ZONA DE ALERTAS */}
         <div className="w-full md:flex-1">{renderBudgetAlerts()}</div>
 
-        {/* ZONA DE TOTALES (DERECHA) */}
+        {/* ZONA DE TOTALES */}
         <div className="w-full md:w-[450px] bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
           <div className="space-y-2 mb-4 text-sm text-slate-600">
             <div className="flex justify-between">
@@ -1397,20 +1320,21 @@ const NewPurchase = () => {
             </div>
           </div>
 
-          {currentBalance > 0 &&
-            header.payment_status === "PAID" &&
-            !isNoteDocument && (
-              <div className="mt-4 p-3 bg-green-100 text-green-800 rounded border border-green-300 text-xs flex flex-col gap-1">
-                <div className="flex items-center gap-2 font-bold">
-                  <Wallet size={16} />
-                  <span>Saldo a favor disponible</span>
-                </div>
-                <p>
-                  El proveedor tiene{" "}
-                  <strong>S/ {currentBalance.toFixed(2)}</strong> a favor.
-                </p>
+          {/* 👇 NUEVO AVISO DE SALDO A FAVOR */}
+          {currentBalance < 0 && !isNoteDocument && (
+            <div className="mt-4 p-3 bg-green-50 text-green-800 rounded-xl border border-green-200 text-sm flex flex-col gap-1">
+              <div className="flex items-center gap-2 font-bold text-green-700">
+                <Wallet size={16} />
+                <span>Saldo a favor disponible</span>
               </div>
-            )}
+              <p className="text-xs mt-1">
+                El proveedor tiene{" "}
+                <strong>S/ {Math.abs(currentBalance).toFixed(2)}</strong> a tu
+                favor. Podrás usarlo en el módulo de Tesorería al liquidar esta
+                factura.
+              </p>
+            </div>
+          )}
 
           <button
             type="button"
@@ -1418,7 +1342,7 @@ const NewPurchase = () => {
             className={`w-full mt-6 text-white py-4 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 uppercase tracking-widest transition-all active:scale-95 ${isNoteDocument ? "bg-orange-500 hover:bg-orange-600 shadow-orange-200" : "bg-blue-600 hover:bg-blue-700 shadow-blue-100"}`}
           >
             <Save size={20} />{" "}
-            {isNoteDocument ? "REGISTRAR NOTA" : "REGISTRAR COMPRA"}
+            {isNoteDocument ? "REGISTRAR NOTA" : "REGISTRAR FACTURA"}
           </button>
         </div>
       </div>

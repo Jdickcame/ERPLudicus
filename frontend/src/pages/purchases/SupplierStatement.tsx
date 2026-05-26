@@ -4,22 +4,23 @@ import {
   Download,
   Eye,
   Filter,
+  RefreshCw,
   Search,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import api from "../../api/axios";
-import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal"; // 👈 Reutilizamos el modal
+import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal";
 
 interface Transaction {
   id: number;
   date: string;
   type: "COMPRA" | "PAGO" | "NOTA_CREDITO" | "SALDO_INICIAL";
   document: string;
-  amount: number; // El backend debe enviarlo con signo correcto, o lo forzamos aquí
+  amount: number;
   status: string;
   description: string;
-  purchase_id?: number; // Para abrir el modal si es compra
+  purchase_id?: number;
 }
 
 const SupplierStatement = () => {
@@ -29,6 +30,7 @@ const SupplierStatement = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [supplier, setSupplier] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false); // 👈 NUEVO: Estado de carga del botón
 
   // Filtros
   const [page, setPage] = useState(1);
@@ -43,12 +45,12 @@ const SupplierStatement = () => {
     null,
   );
 
-  const fetchStatement = async (reset = false) => {
+  const fetchStatement = async (reset = false, customPage?: number) => {
     if (!id) return;
     setLoading(true);
     try {
-      const p = reset ? 1 : page;
-      // Construimos la URL con filtros
+      const p = reset ? 1 : customPage || page;
+
       let url = `/purchases/suppliers/${id}/statement/?page=${p}`;
       if (startDate) url += `&start_date=${startDate}`;
       if (endDate) url += `&end_date=${endDate}`;
@@ -61,9 +63,9 @@ const SupplierStatement = () => {
         setTransactions((prev) => [...prev, ...res.data.results]);
       }
 
-      setHasMore(res.data.results.length > 0);
+      // 👇 MAGIA: El botón SOLO aparecerá si la página actual es menor al total de páginas
+      setHasMore(p < res.data.total_pages);
 
-      // Cargar info del proveedor solo la primera vez o si cambia el ID
       if (!supplier) {
         const suppRes = await api.get(`/purchases/suppliers/${id}/`);
         setSupplier(suppRes.data);
@@ -75,17 +77,42 @@ const SupplierStatement = () => {
     }
   };
 
+  // 👇 NUEVA FUNCIÓN: Ahora sí llama a la base de datos al cambiar de página
+  const handleLoadMore = () => {
+    const nextPage = page + 1;
+    setPage(nextPage);
+    fetchStatement(false, nextPage);
+  };
+
   useEffect(() => {
     fetchStatement(true);
-  }, [id]); // Solo recarga inicial al cambiar de proveedor
+  }, [id]);
 
   const handleFilter = () => {
     setPage(1);
     fetchStatement(true);
   };
 
-  // Función para determinar si es Deuda (Rojo) o Abono (Verde)
-  // Asumimos: COMPRA = Deuda (-), PAGO = Abono (+)
+  // 👇 NUEVO: Función que llama a nuestro nuevo Endpoint de Auditoría
+  const handleSyncBalance = async () => {
+    if (!id) return;
+    setIsSyncing(true);
+    try {
+      const res = await api.post(`/purchases/suppliers/${id}/sync_balance/`);
+
+      // Actualizamos el saldo visualmente de inmediato con el dato auditado
+      setSupplier((prev: any) => ({
+        ...prev,
+        balance: res.data.new_balance,
+      }));
+    } catch (error) {
+      console.error("Error al auditar saldo", error);
+      alert("Hubo un error al intentar sincronizar el saldo.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const isDebt = (type: string) => type === "COMPRA";
 
   return (
@@ -111,10 +138,24 @@ const SupplierStatement = () => {
         </div>
 
         {/* SALDO GIGANTE */}
-        <div className="text-right bg-slate-900 text-white p-5 rounded-2xl shadow-xl min-w-[250px]">
-          <p className="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">
-            Estado de Cuenta
-          </p>
+        <div className="text-right bg-slate-900 text-white p-5 rounded-2xl shadow-xl min-w-[250px] transition-all">
+          {/* 👇 NUEVO: Título con botón de sincronización al lado */}
+          <div className="flex justify-between items-center mb-1 gap-4">
+            <p className="text-xs text-slate-400 uppercase font-bold tracking-wider">
+              Estado de Cuenta
+            </p>
+            <button
+              onClick={handleSyncBalance}
+              disabled={isSyncing}
+              className="text-slate-400 hover:text-blue-400 transition disabled:opacity-50 flex items-center gap-1"
+              title="Auditar y Sincronizar Saldo"
+            >
+              <RefreshCw
+                size={14}
+                className={isSyncing ? "animate-spin text-blue-400" : ""}
+              />
+            </button>
+          </div>
 
           {parseFloat(supplier?.balance || 0) > 0 ? (
             <>
@@ -216,7 +257,7 @@ const SupplierStatement = () => {
               </tr>
             ) : (
               transactions.map((tx, idx) => {
-                const debt = isDebt(tx.type); // Es deuda?
+                const debt = isDebt(tx.type);
                 return (
                   <tr
                     key={`${tx.id}-${idx}`}
@@ -230,8 +271,8 @@ const SupplierStatement = () => {
                       <span
                         className={`px-2 py-1 rounded-full text-[10px] font-bold border ${
                           debt
-                            ? "bg-red-50 text-red-600 border-red-100" // Compra
-                            : "bg-green-50 text-green-600 border-green-100" // Pago
+                            ? "bg-red-50 text-red-600 border-red-100"
+                            : "bg-green-50 text-green-600 border-green-100"
                         }`}
                       >
                         {tx.type}
@@ -254,7 +295,6 @@ const SupplierStatement = () => {
                       S/ {Math.abs(tx.amount).toFixed(2)}
                     </td>
                     <td className="p-4 text-center">
-                      {/* Solo mostramos el ojito si es una COMPRA y tenemos ID */}
                       {tx.type === "COMPRA" && tx.purchase_id && (
                         <button
                           onClick={() =>
@@ -278,7 +318,7 @@ const SupplierStatement = () => {
         {hasMore && (
           <div className="p-4 text-center border-t border-slate-100 bg-slate-50">
             <button
-              onClick={() => setPage((prev) => prev + 1)}
+              onClick={handleLoadMore}
               disabled={loading}
               className="text-slate-600 font-bold text-xs hover:text-blue-600 disabled:opacity-50 transition uppercase tracking-wide flex items-center justify-center gap-2 mx-auto"
             >

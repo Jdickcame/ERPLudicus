@@ -9,17 +9,17 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
-import PaymentModal from "../../components/purchases/PaymentModal";
+// 👇 Importación ajustada a la nueva estructura de carpetas
+import PaymentModal from "../../components/treasury/TreasuryPaymentModal";
 import { useBranch } from "../../context/BranchContext";
 
-// 1. Actualizamos la interfaz para recibir la fecha
 interface SupplierDebt {
   supplier: number;
   supplier__name: string;
   supplier__tax_id: string;
   total_debt: number;
   count: number;
-  next_due_date?: string; // 👈 Campo nuevo (Vencimiento más próximo)
+  next_due_date?: string;
 }
 
 const AccountsPayable = () => {
@@ -27,7 +27,7 @@ const AccountsPayable = () => {
 
   // Estados de datos
   const [debts, setDebts] = useState<SupplierDebt[]>([]);
-  const [totalDebtGlobal, setTotalDebtGlobal] = useState(0); // Estado separado para el total global
+  const [totalDebtGlobal, setTotalDebtGlobal] = useState(0);
 
   // Estados de carga y paginación
   const [loading, setLoading] = useState(true);
@@ -49,19 +49,15 @@ const AccountsPayable = () => {
       else setLoadingMore(true);
 
       try {
-        // Asumimos que tu backend soporta ?page=X
         const res = await api.get(
           `/purchases/suppliers/with_debt/?branch_id=${currentBranch.id}&page=${pageToLoad}`,
         );
 
-        // Detectar si la respuesta es paginada (DRF standard) o lista plana
         const newData = res.data.results || res.data;
-        const totalGlobal = res.data.total_global_debt || 0; // Ideal si el backend manda el total aparte
+        const totalGlobal = res.data.total_global_debt || 0;
 
         if (isRefresh || pageToLoad === 1) {
           setDebts(newData);
-          // Si el backend no manda total global, lo calculamos (solo aproximado de la 1ra pagina)
-          // Lo ideal es que el backend mande un campo "total_debt_global"
           setTotalDebtGlobal(
             totalGlobal > 0
               ? totalGlobal
@@ -74,14 +70,11 @@ const AccountsPayable = () => {
           setDebts((prev) => [...prev, ...newData]);
         }
 
-        // Verificar si hay más páginas
         if (!res.data.next && Array.isArray(newData)) {
-          // Si es lista plana o llegamos al final
           setHasMore(false);
         } else if (res.data.next) {
           setHasMore(true);
         } else {
-          // Fallback si no hay paginación explicita
           setHasMore(newData.length > 0);
         }
 
@@ -96,14 +89,12 @@ const AccountsPayable = () => {
     [currentBranch],
   );
 
-  // Resetear al cambiar de sede
   useEffect(() => {
     setPage(1);
     setHasMore(true);
     loadDebts(1, true);
   }, [loadDebts]);
 
-  // Función auxiliar para saber si la fecha ya venció
   const getDueDateStatus = (dateStr?: string) => {
     if (!dateStr)
       return {
@@ -146,7 +137,7 @@ const AccountsPayable = () => {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <Wallet className="text-red-500" /> Cuentas por Pagar
+            <Wallet className="text-blue-600" /> Tesorería: Cuentas por Pagar
           </h1>
           <p className="text-slate-500">
             Gestión de deuda a proveedores en {currentBranch?.name}
@@ -157,7 +148,6 @@ const AccountsPayable = () => {
 
       {/* TARJETA DE RESUMEN TOTAL */}
       <div className="bg-slate-900 rounded-2xl p-6 text-white shadow-xl mb-8 flex flex-col md:flex-row justify-between items-center relative overflow-hidden">
-        {/* Adorno de fondo */}
         <div className="absolute -right-10 -top-10 text-slate-800 opacity-50">
           <Wallet size={150} />
         </div>
@@ -166,7 +156,7 @@ const AccountsPayable = () => {
           <p className="text-slate-400 font-medium mb-1 uppercase tracking-wider text-xs flex items-center gap-2">
             Deuda Total Pendiente
           </p>
-          <h2 className="text-4xl font-black tracking-tight">
+          <h2 className="text-4xl font-black tracking-tight text-red-400">
             S/{" "}
             {totalDebtGlobal.toLocaleString("es-PE", {
               minimumFractionDigits: 2,
@@ -222,7 +212,6 @@ const AccountsPayable = () => {
                       {item.supplier__tax_id}
                     </p>
 
-                    {/* 🔥 FECHA DE VENCIMIENTO */}
                     {item.next_due_date && (
                       <div
                         className={`text-xs px-2 py-1.5 rounded-md inline-flex items-center gap-1.5 font-medium ${status.bg} ${status.color}`}
@@ -233,13 +222,12 @@ const AccountsPayable = () => {
                     )}
                   </div>
 
-                  {/* FOOTER DE LA TARJETA */}
                   <div className="bg-slate-50 p-4 border-t border-slate-100 flex justify-between items-center">
                     <div>
                       <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
                         Total a Pagar
                       </p>
-                      <p className="text-xl font-black text-slate-800">
+                      <p className="text-xl font-black text-red-600">
                         S/{" "}
                         {item.total_debt.toLocaleString("es-PE", {
                           minimumFractionDigits: 2,
@@ -263,7 +251,6 @@ const AccountsPayable = () => {
               );
             })}
 
-            {/* BOTÓN CARGAR MÁS (LAZY LOAD MANUAL) */}
             {hasMore && (
               <div className="col-span-full flex justify-center mt-4">
                 <button
@@ -284,7 +271,6 @@ const AccountsPayable = () => {
         )}
       </div>
 
-      {/* MODAL DE PAGO */}
       {modalData && (
         <PaymentModal
           isOpen={true}
@@ -292,7 +278,7 @@ const AccountsPayable = () => {
           supplierId={modalData.id}
           supplierName={modalData.name}
           onSuccess={() => {
-            setPage(1); // Resetear al pagar para refrescar datos
+            setPage(1);
             loadDebts(1, true);
           }}
         />

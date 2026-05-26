@@ -3,26 +3,13 @@ from inventory.models import Product
 from rest_framework import serializers
 
 from .models import (
-    Area,
     ExpenseCategory,
     Purchase,
     PurchaseDetail,
     PurchaseNote,
     PurchaseNoteDetail,
     Supplier,
-    SupplierTransaction,
 )
-
-
-class AreaBudgetSerializer(serializers.ModelSerializer):
-    # Ya que 'Area' ahora es global, solo enviamos su ID y su Nombre al frontend.
-    # Mantenemos 'area_label' por si tu frontend lo sigue usando en algún lado.
-    area_label = serializers.CharField(source="name", read_only=True)
-
-    class Meta:
-        model = Area
-        # 💥 Quitamos 'branch', 'budget_limit' y 'monthly_limit' porque ya no viven aquí.
-        fields = ["id", "name", "area_label"]
 
 
 # --- 1. Categorías de Gasto ---
@@ -272,12 +259,6 @@ class PurchaseSerializer(serializers.ModelSerializer):
                 PurchaseDetail.objects.create(purchase=instance, **detail)
 
         return instance
-
-
-class SupplierTransactionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SupplierTransaction
-        fields = "__all__"
 
 
 # --- 5. Detalle de Nota de Compra (Crédito/Débito) ---

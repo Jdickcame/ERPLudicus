@@ -4,7 +4,7 @@ import {
   Edit2,
   PlusCircle,
   Save,
-  Target
+  Target,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
@@ -51,7 +51,7 @@ const Budgets = () => {
     try {
       const [statusRes, choicesRes] = await Promise.all([
         api.get(
-          `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${selectedMonth}`,
+          `/treasury/budgets/status/?branch_id=${currentBranch.id}&month=${selectedMonth}`,
         ),
         api.get("/purchases/purchases/choices/"),
       ]);
@@ -99,7 +99,7 @@ const Budgets = () => {
     try {
       const targetMonth = getNextMonthStr(selectedMonth);
 
-      await api.post("/purchases/budgets/rollover/", {
+      await api.post("/treasury/budgets/rollover/", {
         area_id: stat.area,
         amount: amount,
         source_month: selectedMonth,
@@ -125,7 +125,7 @@ const Budgets = () => {
     if (!currentBranch) return alert("Selecciona una sede");
 
     try {
-      await api.post("/purchases/budgets/set_limit/", {
+      await api.post("/treasury/budgets/set_limit/", {
         area_id: areaValue,
         amount: newLimit,
         branch_id: currentBranch.id, // 👈 Se asegura de enviar la sede actual
