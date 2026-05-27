@@ -4,8 +4,8 @@ import {
   Calendar,
   CreditCard,
   FileText,
-  FileWarning,
   Plus,
+  Printer,
   Smartphone
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -67,14 +67,126 @@ const SaleList = () => {
 
   useEffect(() => {
     fetchSales();
-  }, [fetchSales]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize]);
 
-  // Visualizadores de PDF
-  const viewTicket = async (saleId: number) => {
+  const handleFilterChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>,
+  ) => {
+    setFilters({ ...filters, [e.target.name]: e.target.value });
+  };
+
+  const clearFilters = () => {
+    setFilters(defaultFilters);
+    fetchSales(defaultFilters);
+  };
+
+  const resendToSunat = async (saleId: number) => {
+    setResendingId(saleId);
     try {
-      const response = await api.get(`/sales/sales/${saleId}/print/`, {
+      const response = await api.post(
+        `/sales/sales/${saleId}/send_sunat/?origin=web`,
+      );
+      if (response.data.success) {
+        fetchSales(undefined, true);
+      } else {
+        alert(`❌ Error: ${response.data.error}`);
+        fetchSales(undefined, true);
+      }
+    } catch (error: any) {
+      alert(`❌ Error de conexión: ${error.message}`);
+    } finally {
+      setResendingId(null);
+    }
+  };
+
+  const handleBulkResend = async () => {
+    const pendingSales = sales.filter(
+      (s) =>
+        (s.series.startsWith("B") || s.series.startsWith("F")) &&
+        (!s.sunat_status ||
+          s.sunat_status === "PENDING" ||
+          s.sunat_status === "REJECTED"),
+    );
+
+    if (pendingSales.length === 0) {
+      alert("No hay comprobantes pendientes para enviar en esta página.");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Se enviarán ${pendingSales.length} comprobantes a SUNAT. ¿Iniciar?`,
+      )
+    )
+      return;
+
+    setIsBulkSyncing(true);
+    setBulkProgress({ current: 0, total: pendingSales.length });
+
+    for (let i = 0; i < pendingSales.length; i++) {
+      const sale = pendingSales[i];
+      setBulkProgress({ current: i + 1, total: pendingSales.length });
+      setResendingId(sale.id);
+
+      try {
+        await api.post(`/sales/sales/${sale.id}/send_sunat/?origin=web`);
+        fetchSales(undefined, true);
+      } catch (error) {
+        console.error(`Error al enviar ${sale.series}-${sale.number}`, error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+
+    setResendingId(null);
+    setIsBulkSyncing(false);
+    alert("Proceso de envío finalizado.");
+  };
+
+  const handleExportExcel = async () => {
+    setIsExporting(true);
+    try {
+      const params: any = {};
+      params.origin = "web";
+
+      if (currentBranch?.id) params.branch_id = currentBranch.id;
+      if (filters.search) params.search = filters.search;
+      if (filters.startDate) params.start_date = filters.startDate;
+      if (filters.endDate) params.end_date = filters.endDate;
+      if (filters.docType) params.document_type = filters.docType;
+      if (filters.paymentMethod) params.payment_method = filters.paymentMethod;
+      if (filters.sunatStatus) params.sunat_status = filters.sunatStatus;
+      if (filters.cashRegister) params.cash_register_id = filters.cashRegister;
+      params.nocache = new Date().getTime();
+
+      const response = await api.get(`/sales/sales/export_excel/`, {
+        params,
         responseType: "blob",
       });
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `Ventas_${filters.startDate}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      alert("Error al descargar Excel.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // 👇 RECUPERADO: Lógica original para ver PDF de Venta 👇
+  const viewTicket = async (saleId: number, format: "a4" | "ticket" = "a4") => {
+    try {
+      const response = await api.get(
+        `/sales/sales/${saleId}/print/?papel=${format}`,
+        {
+          responseType: "blob",
+        },
+      );
       const url = window.URL.createObjectURL(
         new Blob([response.data], { type: "application/pdf" }),
       );
@@ -85,15 +197,18 @@ const SaleList = () => {
     }
   };
 
-  const viewCreditNote = async (noteId: number, sunatUrl?: string) => {
-    if (sunatUrl) {
-      window.open(sunatUrl, "_blank");
-      return;
-    }
+  // 👇 RECUPERADO: Lógica original para ver PDF de Nota de Crédito 👇
+  const viewCreditNote = async (
+    noteId: number,
+    format: "a4" | "ticket" = "a4",
+  ) => {
     try {
-      const response = await api.get(`/sales/credit-notes/${noteId}/print/`, {
-        responseType: "blob",
-      });
+      const response = await api.get(
+        `/sales/credit-notes/${noteId}/print/?papel=${format}`,
+        {
+          responseType: "blob",
+        },
+      );
       const url = window.URL.createObjectURL(
         new Blob([response.data], { type: "application/pdf" }),
       );
@@ -185,14 +300,102 @@ const SaleList = () => {
                 </td>
               </tr>
             ) : (
-              sales.map((sale) => {
-                const isAnulada =
-                  sale.credit_notes && sale.credit_notes.length > 0;
+              tableRows.map((row) => {
+                // LÓGICA SI LA FILA ES UNA NOTA DE CRÉDITO
+                if (row.isNC) {
+                  return (
+                    <tr
+                      key={`nc-${row.id}`}
+                      className="bg-orange-50/30 hover:bg-orange-50/50 transition border-l-4 border-l-orange-400"
+                    >
+                      <td className="p-4 font-mono text-slate-500">
+                        <span className="font-bold px-1.5 py-0.5 rounded text-[10px] mr-2 bg-orange-100 text-orange-700">
+                          NCR
+                        </span>
+                        <span className="font-bold text-orange-800">
+                          {row.series}-{row.number}
+                        </span>
+                        <div className="text-[10px] text-slate-400 mt-1">
+                          Ref: {row.parentSale.series}-{row.parentSale.number}
+                        </div>
+                      </td>
+
+                      <td className="p-4">
+                        {renderSunatBadge(
+                          row.sunat_status,
+                          row.sunat_description,
+                        )}
+                      </td>
+
+                      <td className="p-4 text-slate-500">
+                        <div className="flex items-center gap-2">
+                          <Calendar size={14} className="opacity-50" />
+                          <div>
+                            {new Date(row.parentSale.date).toLocaleDateString()}
+                          </div>
+                        </div>
+                      </td>
+
+                      <td className="p-4 text-slate-500">
+                        <div className="font-medium">
+                          {row.parentSale.client_name || "Cliente General"}
+                        </div>
+                        {row.parentSale.client_doc &&
+                          row.parentSale.client_doc !== "00000000" && (
+                            <div className="text-[11px] mt-0.5">
+                              {row.parentSale.client_doc}
+                            </div>
+                          )}
+                      </td>
+
+                      <td className="p-4">
+                        <span className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">
+                          DEVOLUCIÓN
+                        </span>
+                      </td>
+
+                      <td className="p-4 font-bold text-orange-600">
+                        S/ -{parseFloat(row.parentSale.total).toFixed(2)}
+                      </td>
+
+                      {/* 👇 AQUÍ RECUPERAMOS EL BOTÓN QUE PIDE EL PDF AL BACKEND 👇 */}
+                      <td className="p-4 text-right">
+                        <div className="flex justify-end gap-2">
+                          <button
+                            onClick={() => viewCreditNote(row.id, "ticket")}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border bg-white text-orange-600 border-orange-200 hover:bg-orange-50 transition"
+                            title="Ver Ticket de Nota de Crédito (80mm)"
+                          >
+                            <Printer size={16} /> TK
+                          </button>
+                          <button
+                            onClick={() => viewCreditNote(row.id, "a4")}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border bg-white text-orange-600 border-orange-200 hover:bg-orange-50 transition"
+                            title="Ver PDF A4 de Nota de Crédito"
+                          >
+                            <FileText size={16} /> A4
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                }
+
+                // LÓGICA SI LA FILA ES UNA VENTA ORIGINAL (BOL/FAC/TICKET)
+                const isSunatDocument =
+                  row.series.startsWith("B") || row.series.startsWith("F");
+                const canResend =
+                  isSunatDocument &&
+                  (!row.sunat_status ||
+                    row.sunat_status === "PENDING" ||
+                    row.sunat_status === "REJECTED");
 
                 return (
                   <tr
                     key={sale.id}
-                    className={`hover:bg-slate-50 transition group ${isAnulada ? "bg-red-50" : ""}`}
+                    className={`hover:bg-slate-50 transition group ${
+                      isAnulada ? "bg-red-50" : ""
+                    }`}
                   >
                     {/* DOC */}
                     <td className="p-4 font-mono text-slate-500">
@@ -272,7 +475,11 @@ const SaleList = () => {
 
                     {/* TOTAL */}
                     <td
-                      className={`p-4 font-bold ${isAnulada ? "text-slate-400 line-through" : "text-green-600"}`}
+                      className={`p-4 font-bold ${
+                        isAnulada
+                          ? "text-slate-400 line-through"
+                          : "text-green-600"
+                      }`}
                     >
                       S/ {parseFloat(sale.total).toFixed(2)}
                     </td>
@@ -281,11 +488,18 @@ const SaleList = () => {
                     <td className="p-4 text-right">
                       <div className="flex justify-end gap-2">
                         <button
-                          onClick={() => viewTicket(sale.id)}
-                          className="flex items-center gap-1 px-3 py-1 rounded border bg-white text-slate-500 border-slate-200 hover:bg-slate-100 transition"
-                          title="Ver Ticket Original"
+                          onClick={() => viewTicket(row.id, "ticket")}
+                          className="flex items-center gap-1 px-2 py-1 rounded border bg-white text-slate-500 border-slate-200 hover:bg-slate-100 transition font-bold text-xs"
+                          title="Ver en formato Ticket (80mm)"
                         >
-                          <FileText size={16} />
+                          <Printer size={16} /> TK
+                        </button>
+                        <button
+                          onClick={() => viewTicket(row.id, "a4")}
+                          className="flex items-center gap-1 px-2 py-1 rounded border bg-white text-slate-500 border-slate-200 hover:bg-slate-100 transition font-bold text-xs"
+                          title="Ver en formato A4"
+                        >
+                          <FileText size={16} /> A4
                         </button>
 
                         {isAnulada ? (
@@ -309,8 +523,8 @@ const SaleList = () => {
                                 series: `${sale.series}-${sale.number}`,
                               })
                             }
-                            className="flex items-center gap-1 px-3 py-1 rounded border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 transition"
-                            title="Anular Venta"
+                            className="flex items-center gap-1 px-2 py-1 rounded border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 transition"
+                            title="Anular"
                           >
                             <Ban size={16} />
                           </button>

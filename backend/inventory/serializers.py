@@ -46,6 +46,16 @@ class ProductSerializer(serializers.ModelSerializer):
     sku = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     last_cost = serializers.SerializerMethodField()
 
+<<<<<<< HEAD
+=======
+    stock = serializers.SerializerMethodField()
+
+    parent_name = serializers.CharField(
+        source="parent.name", read_only=True, allow_null=True
+    )
+    has_variants = serializers.SerializerMethodField()
+
+>>>>>>> 1d99500 (App Kensis)
     class Meta:
         model = Product
         fields = [
@@ -68,9 +78,19 @@ class ProductSerializer(serializers.ModelSerializer):
             "is_purchasable",
             "manage_stock",
             "has_recipe",
+            "colab_price",
+            "is_group",
+            "parent",
+            "parent_name",
+            "has_variants",
             "created_at",
             "last_cost",
         ]
+
+    def get_has_variants(self, obj):
+        if obj.is_group:
+            return obj.variants.filter(is_active=True).exists()
+        return False
 
     def get_last_cost(self, obj):
         # Buscamos el último movimiento de "Entrada por Compra" en el Kardex

@@ -1,36 +1,43 @@
 {
-  "extends": [
-    "development"
-  ],
+  "extends": ["development"],
   "hints": {
     "axe/name-role-value": [
       "default",
       {
-        "button-name": "off"
-      }
+        "button-name": "off",
+      },
     ],
     "axe/forms": [
       "default",
       {
         "select-name": "off",
-        "label": "off"
-      }
+        "label": "off",
+      },
     ],
     "button-type": "off",
     "no-inline-styles": "off",
     "axe/aria": [
       "default",
       {
-        "empty-table-header": "off"
-      }
+        "empty-table-header": "off",
+      },
     ],
     "compat-api/html": [
       "default",
       {
+        "ignore": ["input[type=month]"],
+      },
+    ],
+    "typescript-config/is-valid": "off",
+    "compat-api/css": [
+      "default",
+      {
         "ignore": [
-          "input[type=month]"
-        ]
-      }
-    ]
-  }
+          "scrollbar-width",
+          "scrollbar-color",
+          "scrollbar-width: thin",
+        ],
+      },
+    ],
+  },
 }

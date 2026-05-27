@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Box,
   Calculator,
   Calendar,
   DollarSign,
@@ -17,6 +18,8 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import toast from "react-hot-toast";
+import { useSearchParams } from "react-router-dom";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import SearchableSelect from "../../components/common/SearchableSelect";
@@ -50,6 +53,10 @@ interface PurchaseDetail {
   category: string | number;
   area: string | number;
   quantity: number | string;
+  // 👇 NUEVOS CAMPOS DE EMPAQUE 👇
+  invoice_unit: string;
+  units_per_package: number | string;
+  // -----------------------------
   unit_value: number | string;
   total_value: number | string;
   tax_percentage: number;
@@ -65,6 +72,21 @@ interface BudgetStatus {
 const NewPurchase = () => {
   const { currentBranch } = useBranch();
   const topRef = useRef<HTMLDivElement>(null);
+
+  // --- OPCIONES DE EMPAQUE (UNIDADES DE FACTURA) ---
+  const INVOICE_UNIT_OPTIONS = [
+    { value: "UNIDAD", label: "Unidad (NIU)" },
+    { value: "CAJA", label: "Caja (CX)" },
+    { value: "FARDO", label: "Fardo (FD)" },
+    { value: "PAQUETE", label: "Paquete (PK)" },
+    { value: "SACO", label: "Saco (SA)" },
+    { value: "LITRO", label: "Litros (LTR)" },
+    { value: "KILO", label: "Kilos (KGM)" },
+    { value: "MILLAR", label: "Millar (MIL)" },
+    { value: "GALON", label: "Galón (GLN)" },
+    { value: "BOLSA", label: "Bolsa (BLS)" },
+    { value: "SERVICIO", label: "Servicio (SRV)" },
+  ];
 
   // --- ESTADOS DE DATOS MAESTROS ---
   const [suppliersList, setSuppliersList] = useState<Supplier[]>([]);
@@ -99,7 +121,7 @@ const NewPurchase = () => {
   const [exchangeRate, setExchangeRate] = useState<string>("1.000");
   const [isLoadingRate, setIsLoadingRate] = useState(false);
 
-  // --- BUSQUEDA ---
+  // --- BUSQUEDA AL BACKEND ---
   const [isSearchingSupplier, setIsSearchingSupplier] = useState(false);
 
   // --- CABECERA LIMPIA ---
@@ -109,7 +131,7 @@ const NewPurchase = () => {
     number: "",
     issue_date: new Date().toISOString().split("T")[0],
     budget_period: new Date().toISOString().slice(0, 7),
-    due_date: new Date().toISOString().split("T")[0], // Fecha de vencimiento (Deuda)
+    due_date: new Date().toISOString().split("T")[0],
     tax_rate: 0.18,
     cost_type: "CF",
   });
@@ -129,6 +151,8 @@ const NewPurchase = () => {
       category: "",
       area: "",
       quantity: 1,
+      invoice_unit: "UNIDAD", // 👈 Defecto
+      units_per_package: 1, // 👈 Defecto
       unit_value: 0,
       total_value: 0,
       tax_percentage: 18,
@@ -216,7 +240,50 @@ const NewPurchase = () => {
     }
   }, [isNoteDocument, supplierId, currentBranch]);
 
-  // --- LÓGICA DE PROVEEDORES ---
+  const [searchParams] = useSearchParams();
+  const ocId = searchParams.get("oc_id");
+
+  // EFECTO PARA CARGAR LA OC SI VENIMOS DE LA VISTA DE LISTADO
+  useEffect(() => {
+    if (ocId && currentBranch) {
+      api
+        .get(`/purchases/purchase-orders/${ocId}/`)
+        .then((res) => {
+          const data = res.data;
+
+          setSupplierId(data.supplier);
+          setSupplierName(data.supplier_name);
+          setRucSearch(data.supplier_tax_id);
+          setIsNewSupplier(false);
+
+          // Transformamos los detalles de la OC a la estructura de la Factura
+          if (data.details && data.details.length > 0) {
+            const mappedDetails = data.details
+              .filter((d: any) => parseFloat(d.quantity_received) > 0) // Solo facturamos lo que ya llegó
+              .map((d: any) => ({
+                product_id: d.product,
+                product_search: d.product_name,
+                description: d.product_name,
+                category: "",
+                area: "",
+                quantity: d.quantity_received,
+                invoice_unit: d.invoice_unit,
+                units_per_package: d.units_per_package,
+                unit_value: d.unit_value,
+                total_value: (
+                  parseFloat(d.quantity_received) * parseFloat(d.unit_value)
+                ).toFixed(2),
+                tax_percentage: 18,
+              }));
+
+            if (mappedDetails.length > 0) setDetails(mappedDetails);
+          }
+        })
+        .catch(console.error);
+    }
+  }, [ocId, currentBranch]);
+
+  // LÓGICA DE PROVEEDORES
   const handleSearchRuc = async () => {
     if (!rucSearch) return;
 
@@ -233,14 +300,26 @@ const NewPurchase = () => {
       const response = await api.get(
         `/purchases/suppliers/search_doc/?doc=${rucSearch}`,
       );
-      const supplierData = response.data;
 
-      setSupplierId(supplierData.id);
+      const existsLocal = response.data.exists_local;
+      const supplierData = response.data.data;
+
       setSupplierName(supplierData.name);
-      setIsNewSupplier(false);
-      setSuppliersList((prev) => [...prev, supplierData]);
-    } catch (error) {
-      console.error("No encontrado en SUNAT/RENIEC", error);
+
+      if (existsLocal) {
+        setSupplierId(supplierData.id);
+        setIsNewSupplier(false);
+        if (!suppliersList.some((s) => s.id === supplierData.id)) {
+          setSuppliersList((prev) => [...prev, supplierData]);
+        }
+      } else {
+        setSupplierId(null);
+        setIsNewSupplier(true);
+        toast.success("Datos obtenidos de SUNAT/RENIEC", { icon: "🏢" });
+      }
+    } catch (error: any) {
+      console.error("No encontrado", error);
+      toast.error(error.response?.data?.error || "Proveedor no encontrado");
       setSupplierId(null);
       setSupplierName("");
       setIsNewSupplier(true);
@@ -307,8 +386,8 @@ const NewPurchase = () => {
     extraTaxType === "PERCEPTION"
       ? totalDocument + parseFloat(extraTaxAmount || "0")
       : extraTaxType !== "NONE"
-        ? totalDocument - parseFloat(extraTaxAmount || "0")
-        : totalDocument;
+      ? totalDocument - parseFloat(extraTaxAmount || "0")
+      : totalDocument;
 
   // --- MANEJO DE TABLA DETALLES ---
   const updateRow = (
@@ -320,7 +399,9 @@ const NewPurchase = () => {
     const row = { ...newDetails[index], [field]: value };
 
     if (field === "product_id") {
-      const prod = products.find((p) => p.id === Number(value));
+      const allKnownProducts = [...products, ...productSearchResults];
+      const prod = allKnownProducts.find((p) => p.id === Number(value));
+
       if (prod) {
         row.description = prod.name;
         if (prod.last_cost) row.unit_value = Number(prod.last_cost);
@@ -330,11 +411,13 @@ const NewPurchase = () => {
       }
     }
 
+    // Recalcular total si cambia cantidad o valor unitario
     if (
       field === "quantity" ||
       field === "unit_value" ||
       field === "product_id"
     ) {
+      // Dejamos que los decimales fluyan naturalmente en el cálculo, sin forzar toFixed aquí.
       row.total_value = Number(row.quantity) * Number(row.unit_value);
     }
 
@@ -351,11 +434,14 @@ const NewPurchase = () => {
         category: "",
         area: "",
         quantity: 1,
+        invoice_unit: "UNIDAD",
+        units_per_package: 1,
         unit_value: 0,
         total_value: 0,
         tax_percentage: 18,
       },
     ]);
+
   const removeRow = (index: number) => {
     if (details.length > 1) setDetails(details.filter((_, i) => i !== index));
   };
@@ -384,6 +470,8 @@ const NewPurchase = () => {
             category: d.category || "",
             area: d.area || "",
             quantity: d.remaining_quantity,
+            invoice_unit: d.invoice_unit || "UNIDAD",
+            units_per_package: d.units_per_package || 1,
             max_quantity: d.remaining_quantity,
             unit_value: d.unit_value,
             total_value: Number(d.remaining_quantity) * Number(d.unit_value),
@@ -401,6 +489,8 @@ const NewPurchase = () => {
               category: "",
               area: "",
               quantity: 1,
+              invoice_unit: "UNIDAD",
+              units_per_package: 1,
               unit_value: 0,
               total_value: 0,
               tax_percentage: 18,
@@ -461,6 +551,8 @@ const NewPurchase = () => {
         category: "",
         area: "",
         quantity: 1,
+        invoice_unit: "UNIDAD",
+        units_per_package: 1,
         unit_value: 0,
         total_value: 0,
         tax_percentage: 18,
@@ -498,10 +590,18 @@ const NewPurchase = () => {
         const supRes = await api.post("/purchases/suppliers/", {
           name: supplierName,
           tax_id: rucSearch,
+          document_type:
+            rucSearch.length === 11
+              ? "RUC"
+              : rucSearch.length === 8
+              ? "DNI"
+              : "CE",
         });
         finalSupplierId = supRes.data.id;
       }
 
+      // 👇 FIX APLICADO: Mantenemos la precisión original para cantidades,
+      // pero fijamos el Total a 2 decimales para la moneda.
       const detailsPayload = details
         .filter((d) => Number(d.quantity) > 0 || !affectsInventory)
         .map((d) => ({
@@ -509,9 +609,11 @@ const NewPurchase = () => {
           description: d.description,
           category: d.category || null,
           area: d.area || null,
-          quantity: d.quantity,
-          unit_value: Number(d.unit_value).toFixed(2),
-          total_value: Number(d.total_value).toFixed(2),
+          quantity: d.quantity, // <- Mantiene decimales (ej. 1.333)
+          invoice_unit: d.invoice_unit || "UNIDAD",
+          units_per_package: d.units_per_package || 1, // <- Mantiene decimales
+          unit_value: d.unit_value, // <- Mantiene decimales (ej. 0.045)
+          total_value: Number(d.total_value).toFixed(2), // <- Total estricto a 2 decimales para contabilidad
           tax_percentage: d.tax_percentage,
         }));
 
@@ -539,6 +641,7 @@ const NewPurchase = () => {
       } else {
         const payload = {
           ...header,
+          purchase_order: ocId ? Number(ocId) : null,
           supplier: finalSupplierId,
           branch_id: currentBranch.id,
           budget_period: `${header.budget_period}-01`,
@@ -637,7 +740,7 @@ const NewPurchase = () => {
   return (
     <div
       ref={topRef}
-      className="p-6 max-w-6xl mx-auto animate-in fade-in duration-500"
+      className="p-6 max-w-[1400px] mx-auto animate-in fade-in duration-500"
     >
       <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         <div className="flex items-center gap-3">
@@ -669,7 +772,9 @@ const NewPurchase = () => {
             <div className="flex gap-2 mt-1">
               <input
                 type="text"
-                className={`w-full border p-2 rounded outline-none ${supplierId ? "bg-slate-100 text-slate-500" : "bg-white"}`}
+                className={`w-full border p-2 rounded outline-none ${
+                  supplierId ? "bg-slate-100 text-slate-500" : "bg-white"
+                }`}
                 placeholder="Escribe y Enter..."
                 value={rucSearch}
                 onChange={(e) => setRucSearch(e.target.value)}
@@ -694,7 +799,7 @@ const NewPurchase = () => {
               Razón Social{" "}
               {isNewSupplier && (
                 <span className="text-green-600 text-xs ml-2 font-bold animate-pulse">
-                  (Nuevo Registro)
+                  (Nuevo Registro SUNAT/RENIEC)
                 </span>
               )}
             </label>
@@ -708,7 +813,11 @@ const NewPurchase = () => {
             <input
               type="text"
               list="suppliers-list"
-              className={`w-full border p-2 rounded mt-1 outline-none ${!isNewSupplier && supplierId ? "bg-slate-100 text-slate-500" : "bg-white border-blue-400"}`}
+              className={`w-full border p-2 rounded mt-1 outline-none ${
+                !isNewSupplier && supplierId
+                  ? "bg-slate-100 text-slate-500"
+                  : "bg-white border-blue-400"
+              }`}
               placeholder="Escribe el nombre del proveedor..."
               value={supplierName}
               onChange={(e) => setSupplierName(e.target.value)}
@@ -733,20 +842,30 @@ const NewPurchase = () => {
             <div className="flex bg-slate-100 p-1 rounded-lg">
               <button
                 onClick={() => setCurrency("PEN")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "PEN" ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                  currency === "PEN"
+                    ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
               >
                 S/ Soles
               </button>
               <button
                 onClick={() => setCurrency("USD")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "USD" ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                  currency === "USD"
+                    ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
               >
                 $ Dólares
               </button>
             </div>
           </div>
           <div
-            className={`transition-opacity duration-200 ${currency === "PEN" ? "opacity-50 grayscale" : "opacity-100"}`}
+            className={`transition-opacity duration-200 ${
+              currency === "PEN" ? "opacity-50 grayscale" : "opacity-100"
+            }`}
           >
             <label className="text-sm font-medium text-slate-700 flex justify-between">
               Tipo de Cambio{" "}
@@ -878,7 +997,11 @@ const NewPurchase = () => {
               <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                 <div className="md:col-span-4">
                   <select
-                    className={`w-full border p-2.5 rounded-lg text-sm font-medium outline-none transition-all ${!supplierId ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed" : "border-orange-300 bg-white focus:ring-2 focus:ring-orange-400 text-slate-700"}`}
+                    className={`w-full border p-2.5 rounded-lg text-sm font-medium outline-none transition-all ${
+                      !supplierId
+                        ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                        : "border-orange-300 bg-white focus:ring-2 focus:ring-orange-400 text-slate-700"
+                    }`}
                     value={selectedReferenceId || ""}
                     onChange={(e) => handleReferenceSelect(e.target.value)}
                     disabled={!supplierId}
@@ -955,7 +1078,6 @@ const NewPurchase = () => {
 
           {!isNoteDocument && (
             <>
-              {/* 👇 NUEVOS CAMPOS REORGANIZADOS: Solo Tipo Costo y Vencimiento */}
               <div className="md:col-span-4">
                 <SearchableSelect
                   label="Tipo de Costo"
@@ -984,15 +1106,18 @@ const NewPurchase = () => {
         </div>
       </div>
 
-      {/* --- TABLA DETALLES --- */}
+      {/* --- TABLA DETALLES CON NUEVOS CAMPOS --- */}
       <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-visible mb-6">
         <table className="w-full text-sm text-left">
-          <thead className="bg-slate-50 text-slate-600 font-semibold uppercase">
+          <thead className="bg-slate-50 text-slate-600 font-semibold uppercase text-[10px] tracking-wider border-b border-slate-200">
             <tr>
-              <th className="p-3 w-1/4 rounded-tl-lg">
+              <th className="p-3 w-[25%] rounded-tl-lg">
                 Producto / Descripción
               </th>
-              <th className="p-3 w-1/4">Centro de Costo</th>
+              <th className="p-3 w-[15%]">Destino del Gasto</th>
+              {/* 👇 Nuevas cabeceras 👇 */}
+              <th className="p-3 w-[15%] text-center">Conversión Unidad</th>
+              {/* 👆 Nuevas cabeceras 👆 */}
               <th className="p-3 w-20 text-center">Cant.</th>
               <th className="p-3 w-24 text-center">V. Unit.</th>
               <th className="p-3 text-center w-20">IGV</th>
@@ -1005,32 +1130,140 @@ const NewPurchase = () => {
               const rowTotalWithTax =
                 Number(row.total_value) *
                 (1 + Number(row.tax_percentage) / 100);
+
+              // Cálculo visual de lo que entrará al almacén
+              const realUnits =
+                Number(row.quantity) * Number(row.units_per_package);
+
               return (
                 <tr key={index}>
                   <td className="p-2 align-top">
                     <div className="flex flex-col gap-1 relative">
                       <div className="flex gap-1 items-start">
-                        <div className="w-full min-w-[150px]">
-                          <SearchableSelect
-                            placeholder="Buscar producto..."
-                            options={[
-                              { value: "", label: "-- Solo Gasto --" },
-                              ...products.map((p) => ({
-                                value: p.id,
-                                label: `${p.sku} - ${p.name}`,
-                              })),
-                            ]}
-                            value={row.product_id || ""}
-                            onChange={(val) =>
-                              updateRow(index, "product_id", val)
-                            }
+                        {/* 👇 BUSCADOR EN VIVO CON CONEXIÓN AL BACKEND 👇 */}
+                        <div className="w-full min-w-[200px] relative row-product-dropdown">
+                          <input
+                            type="text"
+                            placeholder="Buscar (Nombre / SKU)..."
+                            value={row.product_search || ""}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const newDetails = [...details];
+                              newDetails[index].product_search = val;
+                              newDetails[index].product_id = null;
+                              setDetails(newDetails);
+                              setActiveDropdownIndex(index);
+
+                              if (searchTimeout.current)
+                                clearTimeout(searchTimeout.current);
+                              searchTimeout.current = setTimeout(async () => {
+                                if (val.trim().length >= 2) {
+                                  setIsSearchingProduct(true);
+                                  try {
+                                    const res = await api.get(
+                                      `/inventory/products/?search=${val}&page_size=50`,
+                                    );
+                                    setProductSearchResults(
+                                      res.data.results || res.data,
+                                    );
+                                  } catch (error) {
+                                    console.error(error);
+                                  } finally {
+                                    setIsSearchingProduct(false);
+                                  }
+                                } else {
+                                  setProductSearchResults([]); // Si borra, vaciamos la búsqueda
+                                }
+                              }, 350); // Pequeña pausa para no saturar el servidor
+                            }}
+                            onFocus={() => setActiveDropdownIndex(index)}
+                            className="w-full p-2 bg-white border border-slate-300 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                           />
+
+                          {/* Menú Desplegable Flotante */}
+                          {activeDropdownIndex === index && (
+                            <div className="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-2xl max-h-60 overflow-y-auto">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  updateRow(index, "product_id", null);
+                                  setActiveDropdownIndex(null);
+                                }}
+                                className="w-full px-3 py-2.5 text-left hover:bg-slate-100 border-b border-slate-100 text-sm font-bold text-slate-500 transition-colors"
+                              >
+                                -- Solo Gasto (Sin Producto) --
+                              </button>
+
+                              {isSearchingProduct ? (
+                                <div className="p-4 flex justify-center items-center text-blue-500">
+                                  <Loader2 className="animate-spin" size={20} />
+                                </div>
+                              ) : (
+                                (row.product_search &&
+                                row.product_search.length >= 2
+                                  ? productSearchResults
+                                  : products
+                                )
+                                  .filter((p) => {
+                                    // Si ya buscamos en el backend, no filtramos más
+                                    if (
+                                      row.product_search &&
+                                      row.product_search.length >= 2
+                                    )
+                                      return true;
+
+                                    // Si el input está vacío, mostramos los primeros cargados (fallback)
+                                    const term = (
+                                      row.product_search || ""
+                                    ).toLowerCase();
+                                    const matchName = p.name
+                                      ? p.name.toLowerCase().includes(term)
+                                      : false;
+                                    const matchSku = p.sku
+                                      ? p.sku.toLowerCase().includes(term)
+                                      : false;
+                                    return matchName || matchSku;
+                                  })
+                                  .slice(0, 50)
+                                  .map((p) => (
+                                    <button
+                                      key={p.id}
+                                      type="button"
+                                      onClick={() => {
+                                        updateRow(index, "product_id", p.id);
+                                        setActiveDropdownIndex(null);
+                                      }}
+                                      className="w-full px-3 py-2 text-left hover:bg-blue-50 border-b border-slate-100 text-sm transition-colors flex flex-col"
+                                    >
+                                      <span className="font-bold text-slate-700 leading-tight">
+                                        {p.name}
+                                      </span>
+                                      <span className="font-mono text-[10px] text-slate-400 mt-0.5">
+                                        SKU: {p.sku || "S/N"}
+                                      </span>
+                                    </button>
+                                  ))
+                              )}
+
+                              {!isSearchingProduct &&
+                                row.product_search &&
+                                row.product_search.length >= 2 &&
+                                productSearchResults.length === 0 && (
+                                  <div className="p-3 text-sm text-slate-500 text-center">
+                                    No se encontraron coincidencias en la BD
+                                  </div>
+                                )}
+                            </div>
+                          )}
                         </div>
+                        {/* 👆 FIN BUSCADOR EN VIVO 👆 */}
+
                         <button
                           onClick={() =>
                             window.open("/inventory/new", "_blank")
                           }
                           className="bg-slate-100 p-1.5 rounded hover:bg-slate-200 text-slate-600"
+                          title="Crear nuevo producto en inventario"
                         >
                           <PackagePlus size={16} />
                         </button>
@@ -1071,10 +1304,57 @@ const NewPurchase = () => {
                     </div>
                   </td>
 
+                  {/* 👇 NUEVA COLUMNA DE CONVERSIÓN (CON SELECTOR) 👇 */}
+                  <td className="p-2 align-top bg-slate-50/50">
+                    <div className="flex flex-col gap-1.5">
+                      <select
+                        className="border p-1.5 rounded w-full text-xs text-center font-bold text-slate-700 focus:ring-2 focus:ring-blue-200 outline-none cursor-pointer bg-white"
+                        value={row.invoice_unit}
+                        onChange={(e) =>
+                          updateRow(index, "invoice_unit", e.target.value)
+                        }
+                        title="Unidad de medida según la factura"
+                      >
+                        {INVOICE_UNIT_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+
+                      <div className="relative">
+                        <span className="absolute left-2 top-1.5 text-[10px] text-slate-400 font-bold">
+                          x
+                        </span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          placeholder="Unidades"
+                          className="border p-1.5 pl-6 rounded w-full text-xs text-center font-bold text-slate-700 focus:ring-2 focus:ring-blue-200 outline-none"
+                          value={row.units_per_package}
+                          onChange={(e) => {
+                            let val = Number(e.target.value);
+                            if (val <= 0) val = 1;
+                            updateRow(index, "units_per_package", val);
+                          }}
+                          title="¿Cuántas unidades base vienen dentro del empaque?"
+                        />
+                      </div>
+                      {/* Indicador mágico aclarando que va a la Unidad Base */}
+                      {row.product_id && (
+                        <div className="text-[9px] text-center font-bold text-blue-700 bg-blue-100/50 border border-blue-200 py-1 rounded flex items-center justify-center gap-1 shadow-sm mt-0.5">
+                          <Box size={10} /> = {realUnits} Unid. Base al Stock
+                        </div>
+                      )}
+                    </div>
+                  </td>
+                  {/* 👆 FIN NUEVA COLUMNA 👆 */}
+
                   <td className="p-2 align-top">
                     <input
                       type="number"
-                      className={`border p-1.5 rounded w-full text-center transition-all outline-none ${
+                      step="any"
+                      className={`border p-1.5 rounded w-full text-center transition-all outline-none font-bold text-slate-700 ${
                         !affectsInventory && isNoteDocument
                           ? "bg-slate-100 text-slate-400 cursor-not-allowed border-slate-200 opacity-70"
                           : "bg-white focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
@@ -1084,7 +1364,7 @@ const NewPurchase = () => {
                       title={
                         !affectsInventory && isNoteDocument
                           ? "Bloqueado: La nota no mueve mercadería, edita solo el V. Unitario."
-                          : ""
+                          : "Cantidad comprada según la factura"
                       }
                       onChange={(e) => {
                         let val = Number(e.target.value);
@@ -1094,7 +1374,7 @@ const NewPurchase = () => {
                         ) {
                           if (val > row.max_quantity) {
                             alert(
-                              `🔒 Límite superado: Solo quedan ${row.max_quantity} unidades disponibles.`,
+                              `🔒 Límite superado: Solo quedan ${row.max_quantity} disponibles para devolver.`,
                             );
                             val = row.max_quantity;
                           }
@@ -1108,7 +1388,8 @@ const NewPurchase = () => {
                   <td className="p-2 align-top">
                     <input
                       type="number"
-                      className="border p-1.5 rounded w-full text-right"
+                      step="any"
+                      className="border p-1.5 rounded w-full text-right font-medium"
                       value={row.unit_value}
                       onChange={(e) =>
                         updateRow(index, "unit_value", e.target.value)
@@ -1163,9 +1444,9 @@ const NewPurchase = () => {
         <div className="p-3 bg-slate-50 border-t border-slate-200 rounded-b-lg">
           <button
             onClick={addRow}
-            className="text-blue-600 font-medium flex items-center gap-1"
+            className="text-blue-600 font-bold flex items-center gap-1 text-sm bg-white px-3 py-1.5 rounded-md border border-slate-200 shadow-sm hover:bg-blue-50 transition"
           >
-            <Plus size={18} /> Agregar Línea
+            <Plus size={16} /> Agregar Línea
           </button>
         </div>
       </div>
@@ -1191,7 +1472,7 @@ const NewPurchase = () => {
               </span>
             </div>
             <div className="flex justify-between py-2 border-t border-slate-100 font-bold text-slate-800 text-base">
-              <span>Total:</span>
+              <span>Total Documento:</span>
               <span>
                 {currency === "PEN" ? "S/" : "$"} {totalDocument.toFixed(2)}
               </span>
@@ -1261,14 +1542,18 @@ const NewPurchase = () => {
                     <span className="text-sm font-medium text-slate-700">
                       {extraTaxType === "PERCEPTION"
                         ? "Monto Fijo:"
-                        : `Porcentaje (${extraTaxType === "RETENTION" ? "Retención" : "Detracción"}):`}
+                        : `Porcentaje (${
+                            extraTaxType === "RETENTION"
+                              ? "Retención"
+                              : "Detracción"
+                          }):`}
                     </span>
                     <div className="flex items-center gap-2">
                       {extraTaxType !== "PERCEPTION" && (
                         <div className="relative">
                           <input
                             type="number"
-                            className="w-16 p-1 text-right border rounded font-bold text-slate-700 pr-5"
+                            className="w-16 p-1 text-right border rounded font-bold text-slate-700 pr-5 outline-none focus:border-blue-400"
                             value={extraTaxRate}
                             onChange={(e) =>
                               setExtraTaxRate(Number(e.target.value))
@@ -1287,7 +1572,11 @@ const NewPurchase = () => {
                         <input
                           type="number"
                           step="0.01"
-                          className={`w-24 p-1 pl-6 text-right border rounded font-bold ${extraTaxType === "PERCEPTION" ? "bg-white border-purple-300 text-purple-700" : "bg-slate-100 text-slate-600"}`}
+                          className={`w-24 p-1 pl-6 text-right border rounded font-bold outline-none ${
+                            extraTaxType === "PERCEPTION"
+                              ? "bg-white border-purple-300 text-purple-700 focus:ring-2 focus:ring-purple-100"
+                              : "bg-slate-100 text-slate-600 cursor-not-allowed"
+                          }`}
                           value={extraTaxAmount}
                           readOnly={extraTaxType !== "PERCEPTION"}
                           onChange={(e) =>
@@ -1308,7 +1597,7 @@ const NewPurchase = () => {
               TOTAL NETO:
             </span>
             <div className="text-right">
-              <div className="font-black text-2xl text-blue-600">
+              <div className="font-black text-3xl text-blue-600 tracking-tight">
                 {currency === "PEN" ? "S/" : "$"} {totalNetPay.toFixed(2)}
               </div>
               {currency === "USD" && (
@@ -1320,18 +1609,19 @@ const NewPurchase = () => {
             </div>
           </div>
 
-          {/* 👇 NUEVO AVISO DE SALDO A FAVOR */}
           {currentBalance < 0 && !isNoteDocument && (
-            <div className="mt-4 p-3 bg-green-50 text-green-800 rounded-xl border border-green-200 text-sm flex flex-col gap-1">
-              <div className="flex items-center gap-2 font-bold text-green-700">
-                <Wallet size={16} />
+            <div className="mt-5 p-4 bg-emerald-50 text-emerald-800 rounded-xl border border-emerald-200 text-sm flex flex-col gap-1.5 shadow-sm">
+              <div className="flex items-center gap-2 font-black text-emerald-700">
+                <Wallet size={18} />
                 <span>Saldo a favor disponible</span>
               </div>
-              <p className="text-xs mt-1">
+              <p className="text-xs text-emerald-600 font-medium">
                 El proveedor tiene{" "}
-                <strong>S/ {Math.abs(currentBalance).toFixed(2)}</strong> a tu
-                favor. Podrás usarlo en el módulo de Tesorería al liquidar esta
-                factura.
+                <strong className="text-emerald-800">
+                  S/ {Math.abs(currentBalance).toFixed(2)}
+                </strong>{" "}
+                a tu favor. Podrás cruzar este saldo en Tesorería al liquidar
+                esta factura.
               </p>
             </div>
           )}
@@ -1339,10 +1629,14 @@ const NewPurchase = () => {
           <button
             type="button"
             onClick={handleSubmit}
-            className={`w-full mt-6 text-white py-4 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 uppercase tracking-widest transition-all active:scale-95 ${isNoteDocument ? "bg-orange-500 hover:bg-orange-600 shadow-orange-200" : "bg-blue-600 hover:bg-blue-700 shadow-blue-100"}`}
+            className={`w-full mt-6 text-white py-4 rounded-xl font-black shadow-lg flex items-center justify-center gap-2 uppercase tracking-widest transition-all active:scale-95 ${
+              isNoteDocument
+                ? "bg-orange-500 hover:bg-orange-600 shadow-orange-200"
+                : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
+            }`}
           >
             <Save size={20} />{" "}
-            {isNoteDocument ? "REGISTRAR NOTA" : "REGISTRAR FACTURA"}
+            {isNoteDocument ? "REGISTRAR NOTA" : "PROCESAR COMPRA"}
           </button>
         </div>
       </div>

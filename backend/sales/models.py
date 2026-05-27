@@ -12,7 +12,7 @@ PAYMENT_METHODS = [
     (
         "COURTESY",
         "Cortesía (Costo Cero)",
-    ),  # 👈 NUEVO: Para separar esto de tu caja real
+    ),
 ]
 
 DOCUMENT_TYPE_CHOICES = [
@@ -55,15 +55,20 @@ class Sale(models.Model):
     # --- RELACIONES ---
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
     notes = models.CharField(max_length=255, blank=True, null=True)
+
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    is_synced = models.BooleanField(
+        default=True
+    )  # True si se hizo online, False si vino del modo Offline
+
     customer = models.ForeignKey(
         Customer, on_delete=models.PROTECT, null=True, blank=True
     )
-    # 👈 CAMBIO MENOR: Le agregué related_name para que no choque con authorized_by
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="sales_made"
     )
 
-    # 👈 NUEVO: El administrador que metió el PIN para autorizar el regalo
     authorized_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -72,7 +77,6 @@ class Sale(models.Model):
         related_name="authorized_courtesies",
     )
 
-    # 👈 NUEVO: Check para saber que esta venta no va a SUNAT
     is_courtesy = models.BooleanField(default=False)
 
     # --- DATOS GENERALES ---
@@ -186,7 +190,16 @@ class CreditNote(models.Model):
     # Auditoría API
     json_sent = models.JSONField(null=True, blank=True)
     json_response = models.JSONField(null=True, blank=True)
-    sunat_pdf_url = models.URLField(null=True, blank=True)
+
+    sunat_status = models.CharField(max_length=20, null=True, blank=True)
+    sunat_description = models.TextField(
+        null=True, blank=True
+    )  # Este está perfecto (TextField no tiene límite)
+
+    sunat_hash = models.TextField(null=True, blank=True)
+    sunat_xml_url = models.TextField(null=True, blank=True)
+    sunat_cdr_url = models.TextField(null=True, blank=True)
+    sunat_pdf_url = models.TextField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.series}-{self.number}"

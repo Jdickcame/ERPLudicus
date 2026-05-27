@@ -7,6 +7,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import toast from "react-hot-toast";
 import api from "../../api/axios";
 import { useAuth } from "../../context/AuthContext";
 import { useBranch } from "../../context/BranchContext";
@@ -42,26 +43,48 @@ const PosReports = () => {
   const [courtesies, setCourtesies] = useState<Sale[]>([]); // 👈 NUEVO: Estado para cortesías
   const [loading, setLoading] = useState(true);
 
-  // Seguridad: Solo gerentes o admins
-  const isManager =
+  const [shiftOpenedAt, setShiftOpenedAt] = useState<string>("");
+  const [currentShiftId, setCurrentShiftId] = useState<number | null>(null); // 👈 NUEVO: GUARDAMOS EL ID DEL TURNO
+
+  const isManagerByDefault =
     user?.role === "ADMIN" || user?.role === "MANAGER" || user?.is_superuser;
 
-  useEffect(() => {
-    const fetchShiftData = async () => {
-      if (!currentBranch || !isManager) return;
-      setLoading(true);
-      try {
-        const shiftRes = await api.get("/cash/shifts/current/");
-        const shiftOpenDate = new Date(shiftRes.data.opened_at);
+  const [isUnlocked, setIsUnlocked] = useState(isManagerByDefault);
+  const [authPin, setAuthPin] = useState("");
+  const [pinError, setPinError] = useState("");
 
-        const response = await api.get(
-          `/sales/sales/?branch_id=${currentBranch.id}&ordering=-date`,
-        );
-        const results = response.data.results || response.data;
+  const isAndroid = Capacitor.getPlatform() === "android";
 
-        // Clasificamos las ventas del turno
-        const validSales: Sale[] = [];
-        const courtesySales: Sale[] = [];
+  const hoverPrintBtn = !isAndroid
+    ? "hover:text-slate-800 hover:bg-slate-200"
+    : "active:bg-slate-200 active:scale-95 transition-all";
+
+  const hoverPrintBtnPurple = !isAndroid
+    ? "hover:text-purple-800 hover:bg-purple-200"
+    : "active:bg-purple-200 active:scale-95 transition-all";
+
+  const hoverRow = !isAndroid
+    ? "hover:bg-slate-50"
+    : "active:bg-slate-100 transition-colors";
+  const hoverRowPurple = !isAndroid
+    ? "hover:bg-purple-50/30"
+    : "active:bg-purple-100/50 transition-colors";
+
+  const processSalesData = (
+    shiftOpenDateStr: string,
+    pendingSales: any[],
+    serverSales: any[],
+  ) => {
+    const shiftOpenDate = new Date(shiftOpenDateStr);
+    setShiftOpenedAt(shiftOpenDate.toLocaleString("es-PE", { hour12: false }));
+
+    const combinedSales = [...pendingSales, ...serverSales];
+    const uniqueMap = new Map();
+    combinedSales.forEach((sale) => uniqueMap.set(sale.id, sale));
+    const uniqueSales = Array.from(uniqueMap.values());
+
+    const validSales: Sale[] = [];
+    const courtesySales: Sale[] = [];
 
         results.forEach((sale: Sale) => {
           const saleDate = new Date(sale.date);
@@ -80,19 +103,135 @@ const PosReports = () => {
           }
         });
 
-        setSales(validSales);
-        setCourtesies(courtesySales); // Guardamos las cortesías
-      } catch (error) {
-        console.error("Error cargando reporte", error);
-      } finally {
-        setLoading(false);
-      }
-    };
+    setSales(validSales);
+    setCourtesies(courtesySales);
+  };
+
+  const fetchShiftData = async () => {
+    if (!currentBranch || !isUnlocked) return;
+    setLoading(true);
+
+    try {
+      const localSalesRaw = await db.sales
+        .filter((s) => s.sync_status !== "SYNCED")
+        .toArray();
+      const pendingSalesFormatted = await Promise.all(
+        localSalesRaw.map(async (s: any) => {
+          const details = await Promise.all(
+            s.payload.details.map(async (d: any) => {
+              const prod = await db.products.get(d.product);
+              return {
+                product: { name: prod ? prod.name : "Producto Desc." },
+                quantity: d.quantity,
+                price: d.price,
+              };
+            }),
+          );
+
+          const [series, number] = s.local_invoice_number
+            ? s.local_invoice_number.split("-")
+            : ["L", s.uuid.substring(0, 6)];
+          const isCourtesy =
+            s.payload.invoice_type_code === "99" ||
+            s.payload.payments?.some(
+              (p: any) => p.method === "COURTESY" || p.method === "CORTESÍA",
+            );
+
+          return {
+            id: s.uuid,
+            series,
+            number,
+            total: s.total.toString(),
+            date: s.date,
+            status: "PENDING",
+            invoice_type_code: s.payload.invoice_type_code,
+            is_courtesy: isCourtesy,
+            details,
+            discount_amount: s.payload.discount_amount || 0,
+          };
+        }),
+      );
+
+      if (!navigator.onLine) throw new Error("Offline");
+
+      const shiftRes = await api.get("/cash/shifts/current/");
+      const shiftOpenDateStr = shiftRes.data.opened_at;
+      const shiftId = shiftRes.data.id;
+
+      setCurrentShiftId(shiftId); // 👈 GUARDAMOS EN ESTADO PARA EL BOTÓN DE IMPRIMIR
+
+      const response = await api.get(
+        `/sales/sales/?origin=pos&shift_id=${shiftId}&branch_id=${currentBranch.id}&ordering=-date&page_size=1000`,
+      );
+      const serverSales = response.data.results || response.data;
+
+      localStorage.setItem("pos_shift_open_date", shiftOpenDateStr);
+      localStorage.setItem("pos_shift_id", shiftId.toString()); // Backup por si acaso
+      localStorage.setItem("pos_sales_cache", JSON.stringify(serverSales));
+      setIsOfflineMode(false);
+
+      processSalesData(shiftOpenDateStr, pendingSalesFormatted, serverSales);
+    } catch (error) {
+      console.warn("Cargando reportes en modo offline...");
+      setIsOfflineMode(true);
+
+      const shiftOpenDateStr =
+        localStorage.getItem("pos_shift_open_date") || new Date().toISOString();
+      const savedShiftId = localStorage.getItem("pos_shift_id");
+      if (savedShiftId) setCurrentShiftId(parseInt(savedShiftId));
+
+      const serverSales = JSON.parse(
+        localStorage.getItem("pos_sales_cache") || "[]",
+      );
+
+      const localSalesRaw = await db.sales
+        .filter((s) => s.sync_status !== "SYNCED")
+        .toArray();
+      const pendingSalesFormatted = await Promise.all(
+        localSalesRaw.map(async (s: any) => {
+          const details = await Promise.all(
+            s.payload.details.map(async (d: any) => {
+              const prod = await db.products.get(d.product);
+              return {
+                product: { name: prod ? prod.name : "Producto Desc." },
+                quantity: d.quantity,
+                price: d.price,
+              };
+            }),
+          );
+          const [series, number] = s.local_invoice_number
+            ? s.local_invoice_number.split("-")
+            : ["L", s.uuid.substring(0, 6)];
+          const isCourtesy =
+            s.payload.invoice_type_code === "99" ||
+            s.payload.payments?.some(
+              (p: any) => p.method === "COURTESY" || p.method === "CORTESÍA",
+            );
+
+          return {
+            id: s.uuid,
+            series,
+            number,
+            total: s.total.toString(),
+            date: s.date,
+            status: "PENDING",
+            invoice_type_code: s.payload.invoice_type_code,
+            is_courtesy: isCourtesy,
+            details,
+            discount_amount: s.payload.discount_amount || 0,
+          };
+        }),
+      );
+
+      processSalesData(shiftOpenDateStr, pendingSalesFormatted, serverSales);
+    } finally {
+      setLoading(false);
+    }
+  };
 
     fetchShiftData();
   }, [currentBranch, isManager]);
 
-  // --- CÁLCULOS MATEMÁTICOS (Ventas Reales) ---
   const totalGross = sales.reduce(
     (acc, sale) => acc + parseFloat(sale.total),
     0,
@@ -158,12 +297,100 @@ const PosReports = () => {
     .map(([name, data]: any) => ({ name, ...data }))
     .sort((a, b) => b.qty - a.qty);
 
-  // --- IMPRESIÓN ---
-  const printPdfSilently = async (endpointUrl: string) => {
-    try {
-      const response = await api.get(endpointUrl, { responseType: "blob" });
-      const pdfBlob = new Blob([response.data], { type: "application/pdf" });
-      const pdfUrl = window.URL.createObjectURL(pdfBlob);
+  const handlePrintReport = async (
+    reportType: "HOURLY" | "PMIX" | "COURTESIES",
+    endpointBaseUrl: string,
+  ) => {
+    let reportData: any = {
+      type: reportType,
+      openedAt: shiftOpenedAt,
+      branch: currentBranch
+        ? {
+            name: currentBranch.name,
+            address: currentBranch.address,
+            phone: currentBranch.phone,
+          }
+        : null,
+    };
+
+    if (reportType === "HOURLY") {
+      reportData.hours = hourlyData.map((d: any) => ({
+        timeLabel: d.time,
+        count: d.count,
+        net: d.totalNet,
+        gross: d.totalGross,
+      }));
+      reportData.totalTickets = sales.length;
+      reportData.totalGross = totalGross;
+    } else if (reportType === "PMIX") {
+      reportData.items = pmixData.map((d: any) => ({
+        name: d.name,
+        qty: d.qty,
+      }));
+    } else if (reportType === "COURTESIES") {
+      const courtesiesPmix: any = {};
+      courtesies.forEach((sale) => {
+        sale.details?.forEach((d) => {
+          const name =
+            d.product?.name || d.product_name || "Producto Desconocido";
+          courtesiesPmix[name] =
+            (courtesiesPmix[name] || 0) + Number(d.quantity);
+        });
+      });
+      reportData.items = Object.entries(courtesiesPmix)
+        .map(([name, qty]) => ({ name, qty }))
+        .sort((a: any, b: any) => b.qty - a.qty);
+      reportData.totalCost = totalCourtesyCost;
+    }
+
+    const isElectron =
+      /electron/i.test(navigator.userAgent) || !!(window as any).electronAPI;
+
+    if (isAndroid) {
+      try {
+        const isConnected = await BluetoothPrinter.isDeviceConnected();
+        if (!isConnected) {
+          toast.error(
+            "Impresora Bluetooth no conectada. Ve a Ajustes de Impresión.",
+          );
+          return;
+        }
+
+        toast.success("Enviando reporte a la impresora...");
+        await BluetoothPrinter.printPosReportESC(reportData);
+        toast.success("Reporte impreso correctamente.");
+      } catch (error) {
+        console.error("Error imprimiendo por Bluetooth:", error);
+        toast.error("Falló la impresión Bluetooth.");
+      }
+    } else if (isElectron) {
+      try {
+        if ((window as any).electronAPI) {
+          (window as any).electronAPI.printReport(reportData);
+          toast.success("Reporte enviado a impresora local.");
+        }
+      } catch (error) {
+        toast.error("Ocurrió un error al enviar la impresión local.");
+      }
+    } else {
+      if (isOfflineMode) {
+        return alert(
+          "Para imprimir reportes sin internet debes usar la aplicación de escritorio o la tablet iMin.",
+        );
+      }
+      try {
+        toast.loading("Generando PDF...");
+
+        // 👇 SOLUCIÓN: LE PASAMOS EL ID DEL TURNO A LA URL DEL PDF 👇
+        let finalPdfUrl = endpointBaseUrl;
+        if (currentShiftId) {
+          finalPdfUrl += `?shift_id=${currentShiftId}`;
+        }
+
+        const response = await api.get(finalPdfUrl, { responseType: "blob" });
+        const pdfUrl = window.URL.createObjectURL(
+          new Blob([response.data], { type: "application/pdf" }),
+        );
 
       const iframe = document.createElement("iframe");
       iframe.style.display = "none";
@@ -205,15 +432,18 @@ const PosReports = () => {
     <div className="h-screen flex flex-col bg-slate-100 overflow-hidden font-sans">
       <PosHeader />
 
-      <div className="flex-1 overflow-y-auto p-6 max-w-7xl mx-auto w-full space-y-6 custom-scrollbar">
+      <div
+        className={`flex-1 overflow-y-auto p-6 max-w-7xl mx-auto w-full space-y-6 custom-scrollbar ${
+          isOfflineMode ? "mt-4" : ""
+        }`}
+      >
         {loading ? (
           <div className="text-center py-20 text-slate-400 animate-pulse font-medium">
             Calculando métricas...
           </div>
         ) : (
           <>
-            {/* TARJETAS RESUMEN - Ahora son 4 columnas */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 md:gap-6">
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
                 <div className="flex items-center gap-2 text-slate-500 font-bold text-[11px] uppercase tracking-wider mb-2">
                   <DollarSign size={16} className="text-green-600" /> Venta
@@ -267,7 +497,6 @@ const PosReports = () => {
 
             {/* TABLAS - Primera fila */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-              {/* 1. TABLA DE DESGLOSE POR HORA */}
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
                   <h3 className="font-bold text-slate-700">
@@ -275,9 +504,9 @@ const PosReports = () => {
                   </h3>
                   <button
                     onClick={() =>
-                      printPdfSilently("/sales/reports/hourly/print/")
+                      handlePrintReport("HOURLY", "/sales/reports/hourly/print")
                     }
-                    className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors"
+                    className={`p-1.5 text-slate-400 rounded-lg bg-transparent ${hoverPrintBtn}`}
                   >
                     <Printer size={18} />
                   </button>
@@ -331,7 +560,6 @@ const PosReports = () => {
                 </div>
               </div>
 
-              {/* 2. TABLA DE PRODUCT MIX (PMIX) */}
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                   <h3 className="font-bold text-slate-700">
@@ -343,9 +571,9 @@ const PosReports = () => {
                     </span>
                     <button
                       onClick={() =>
-                        printPdfSilently("/sales/reports/pmix/print/")
+                        handlePrintReport("PMIX", "/sales/reports/pmix/print")
                       }
-                      className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-200 rounded-lg transition-colors"
+                      className={`p-1.5 text-slate-400 rounded-lg bg-transparent ${hoverPrintBtn}`}
                     >
                       <Printer size={18} />
                     </button>
@@ -394,7 +622,6 @@ const PosReports = () => {
               </div>
             </div>
 
-            {/* 👇 NUEVO: 3. TABLA DE DESGLOSE DE CORTESÍAS */}
             <div className="bg-white rounded-2xl shadow-sm border border-purple-200 overflow-hidden mb-8">
               {/* CABECERA CON BOTÓN DE IMPRESIÓN */}
               <div className="p-4 border-b border-purple-100 bg-purple-50 flex justify-between items-center">
@@ -403,10 +630,12 @@ const PosReports = () => {
                 </h3>
                 <button
                   onClick={() =>
-                    printPdfSilently("/sales/reports/courtesies/print/")
+                    handlePrintReport(
+                      "COURTESIES",
+                      "/sales/reports/courtesies/print",
+                    )
                   }
-                  className="p-1.5 text-purple-500 hover:text-purple-800 hover:bg-purple-200 rounded-lg transition-colors"
-                  title="Imprimir Reporte de Cortesías"
+                  className={`p-1.5 text-purple-500 rounded-lg bg-transparent ${hoverPrintBtnPurple}`}
                 >
                   <Printer size={18} />
                 </button>
@@ -446,7 +675,9 @@ const PosReports = () => {
                         const itemsList = sale.details
                           ?.map(
                             (d) =>
-                              `${d.quantity}x ${d.product?.name || d.product_name}`,
+                              `${d.quantity}x ${
+                                d.product?.name || d.product_name
+                              }`,
                           )
                           .join(", ");
 

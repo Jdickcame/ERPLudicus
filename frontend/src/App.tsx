@@ -18,7 +18,9 @@ import EditPurchase from "./pages/purchases/EditPurchase";
 import NewPurchase from "./pages/purchases/NewPurchase";
 import PurchaseList from "./pages/purchases/PurchaseList";
 import Suppliers from "./pages/purchases/Suppliers";
-import SupplierStatement from "./pages/purchases/SupplierStatement";
+// 👇 NUEVAS IMPORTACIONES DE OC 👇
+import NewPurchaseOrder from "./pages/purchases/NewPurchaseOrder";
+import PurchaseOrderList from "./pages/purchases/PurchaseOrderList";
 
 // Tesorería (¡Las nuevas rutas!)
 import AccountsPayable from "./pages/treasury/AccountsPayable";
@@ -32,24 +34,61 @@ import SaleList from "./pages/sales/SaleList";
 
 // Caja
 import CashPage from "./pages/cash/CashPage";
+import CashRegistersPage from "./pages/cash/CashRegistersPage";
 
-// Autenticación y Contextos
-import { AuthProvider } from "./context/AuthContext";
-import { BranchProvider } from "./context/BranchContext";
-import PosLogin from "./pages/auth/PosLogin";
-import UserList from "./pages/users/UserList";
-
-// Core / Seguridad
+// Usuarios y Core
 import PermissionRoute from "./components/routes/PermissionRoute";
 import ExchangeRates from "./pages/core/ExchangeRates";
+import EventEditPage from "./pages/events/EventEditPage";
+import MermasReport from "./pages/reports/MermasReport";
+import ProductSalesReport from "./pages/reports/ProductSalesReport";
+import UserList from "./pages/users/UserList";
 
-// --- COMPONENTE DE PROTECCIÓN BÁSICA ---
+// ======================================================================
+// 1. EL CEREBRO: DETECTOR DE HARDWARE
+// ======================================================================
+const isNativePos = () => {
+  return Capacitor.isNativePlatform();
+};
+
+// ======================================================================
+// 2. EL GUARDIÁN PRINCIPAL
+// ======================================================================
 const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
   const token = localStorage.getItem("access_token");
   if (!token) {
-    return <Navigate to="/login" replace />;
+    if (isNativePos() || location.pathname.startsWith("/pos")) {
+      return <Navigate to="/pos-login" state={{ from: location }} replace />;
+    }
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
+
+  if (isNativePos() && !location.pathname.startsWith("/pos")) {
+    return <Navigate to="/pos" replace />;
+  }
+
   return children;
+};
+
+// ======================================================================
+// 3. EL ENRUTADOR INTELIGENTE
+// ======================================================================
+const SmartRootRedirect = () => {
+  const token = localStorage.getItem("access_token");
+
+  if (!token) {
+    return isNativePos() ? (
+      <Navigate to="/pos-login" replace />
+    ) : (
+      <Navigate to="/login" replace />
+    );
+  } else {
+    return isNativePos() ? (
+      <Navigate to="/pos" replace />
+    ) : (
+      <Navigate to="/dashboard" replace />
+    );
+  }
 };
 
 function App() {
@@ -58,11 +97,10 @@ function App() {
       <AuthProvider>
         <BranchProvider>
           <Routes>
-            {/* RUTAS PÚBLICAS */}
             <Route path="/login" element={<Login />} />
             <Route path="/pos-login" element={<PosLogin />} />
+            <Route path="/" element={<SmartRootRedirect />} />
 
-            {/* RUTAS PROTEGIDAS */}
             <Route
               element={
                 <ProtectedRoute>
@@ -83,9 +121,11 @@ function App() {
                 <Route path="/pos/reports" element={<PosReports />} />
               </Route>
 
+              {/* ZONA CAJA */}
               <Route element={<PermissionRoute module="cash" />}>
                 <Route path="/cash" element={<CashPage />} />
-                <Route path="/pos/cash" element={<CashPage />} />
+                <Route path="/cash/audit" element={<AdminCashAudit />} />
+                <Route path="/cash/registers" element={<CashRegistersPage />} />
               </Route>
 
               {/* ZONA COMPRAS Y TESORERÍA */}
@@ -95,15 +135,24 @@ function App() {
                 <Route path="/purchases/new" element={<NewPurchase />} />
                 <Route path="/purchases/edit/:id" element={<EditPurchase />} />
                 <Route path="/purchases/suppliers" element={<Suppliers />} />
+
+                {/* 👇 NUEVAS RUTAS DE ÓRDENES DE COMPRA 👇 */}
                 <Route
-                  path="/purchases/suppliers/:id/statement"
-                  element={<SupplierStatement />}
+                  path="/purchases/orders"
+                  element={<PurchaseOrderList />}
+                />
+                <Route
+                  path="/purchases/orders/new"
+                  element={<NewPurchaseOrder />}
                 />
 
-                {/* 🏦 Tesorería */}
                 <Route
                   path="/treasury/payables"
                   element={<AccountsPayable />}
+                />
+                <Route
+                  path="/treasury/payables/:id/statement"
+                  element={<SupplierStatement />}
                 />
                 <Route path="/treasury/budgets" element={<Budgets />} />
               </Route>
@@ -125,7 +174,22 @@ function App() {
                   path="/inventory/transfers"
                   element={<TransfersPage />}
                 />
+                <Route
+                  path="/reports/product-sales"
+                  element={<ProductSalesReport />}
+                />
+                <Route path="/reports/mermas" element={<MermasReport />} />
               </Route>
+
+              {/* ZONA EVENTOS */}
+              <Route path="/events" element={<EventListPage />} />
+              <Route path="/events/create" element={<EventCreatePage />} />
+              <Route path="/events/:eventId/edit" element={<EventEditPage />} />
+              <Route
+                path="/events/:eventId/taquilla"
+                element={<EventTaquillaPage />}
+              />
+              <Route path="/events/new" element={<NewRegistrationPage />} />
 
               <Route
                 path="/config/exchange-rates"
@@ -133,9 +197,7 @@ function App() {
               />
             </Route>
 
-            {/* Redirecciones por defecto */}
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="*" element={<SmartRootRedirect />} />
           </Routes>
         </BranchProvider>
       </AuthProvider>

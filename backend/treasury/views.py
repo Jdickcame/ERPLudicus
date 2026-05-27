@@ -30,7 +30,6 @@ class TreasuryViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"])
     def pay_invoices(self, request):
         purchase_ids = request.data.get("purchase_ids", [])
-        # 👇 NUEVO: Recibimos cuánto dinero real salió del banco
         amount_paid = Decimal(str(request.data.get("amount_paid", 0)))
         payment_date = request.data.get("payment_date", timezone.now().date())
         payment_method = request.data.get("payment_method", "TRANSFER")
@@ -45,37 +44,34 @@ class TreasuryViewSet(viewsets.ViewSet):
         purchases = Purchase.objects.filter(
             id__in=purchase_ids, payment_status="PENDING"
         )
-        if not purchases.exists():
-            return Response(
-                {"error": "Las facturas ya están pagadas o no existen"}, status=400
-            )
 
         try:
             with transaction.atomic():
+                if not purchases.exists():
+                    return Response({"error": "Facturas ya pagadas"}, status=400)
+
                 supplier = purchases.first().supplier
 
-                # 1. Cambiar estado de las compras a PAGADO
                 for p in purchases:
                     p.payment_status = "PAID"
                     p.save()
 
-                # 2. Descontar SOLO la plata real que salió del banco a la deuda del proveedor
+                # Restamos el dinero NUEVO ingresado al saldo
                 supplier.balance -= amount_paid
                 supplier.save()
 
-                # 3. Registrar el movimiento en Tesorería SOLO si hubo pago real (si no fue 100% cruce de saldo)
-                if amount_paid > 0:
-                    doc_refs = ", ".join([f"{p.series}-{p.number}" for p in purchases])
-                    PaymentTransaction.objects.create(
-                        supplier=supplier,
-                        transaction_type="PAYMENT",
-                        payment_method=payment_method,
-                        amount=amount_paid,
-                        transaction_number=transaction_number,
-                        payment_date=payment_date,
-                        description=f"Pago de facturas: {doc_refs} | {observation}",
-                    )
-
+                # 👇 EL ARREGLO: Ya no hay "if amount > 0".
+                # SIEMPRE se crea el rastro, incluso si fue un cruce de saldo puro.
+                doc_refs = ", ".join([f"{p.series}-{p.number}" for p in purchases])
+                PaymentTransaction.objects.create(
+                    supplier=supplier,
+                    transaction_type="PAYMENT",
+                    payment_method=payment_method,
+                    amount=amount_paid,
+                    transaction_number=transaction_number,
+                    payment_date=payment_date,
+                    description=f"Pago/Liquidación: {doc_refs} | {observation}",
+                )
                 return Response({"message": "Facturas liquidadas exitosamente."})
         except Exception as e:
             return Response({"error": str(e)}, status=500)
@@ -135,6 +131,39 @@ class TreasuryViewSet(viewsets.ViewSet):
                 "payment_methods": format_opts(PaymentTransaction.PAYMENT_METHODS),
             }
         )
+
+    @action(detail=False, methods=["get"])
+    def purchase_payments(self, request):
+        purchase_id = request.query_params.get("purchase_id")
+        if not purchase_id:
+            return Response({"error": "Falta purchase_id"}, status=400)
+
+        # Buscamos transacciones de pago cuya descripción contenga el ID de la factura (o su serie)
+        # Nota: Como en pay_invoices guardamos la serie-numero en la descripcion,
+        # lo ideal es buscar por la compra.
+        try:
+            purchase = Purchase.objects.get(id=purchase_id)
+            doc_ref = f"{purchase.series}-{purchase.number}"
+
+            # Buscamos transacciones que hayan cruzado este documento
+            transactions = PaymentTransaction.objects.filter(
+                description__icontains=doc_ref, transaction_type="PAYMENT"
+            ).order_by("-payment_date")
+
+            data = [
+                {
+                    "date": t.payment_date,
+                    "method": t.get_payment_method_display(),
+                    "amount": float(t.amount),
+                    "transaction_number": t.transaction_number,
+                    "description": t.description,
+                }
+                for t in transactions
+            ]
+
+            return Response(data)
+        except Exception as e:
+            return Response({"error": str(e)}, status=400)
 
 
 # --- 2. VIEWSET DE PRESUPUESTOS (NUEVA ARQUITECTURA) ---

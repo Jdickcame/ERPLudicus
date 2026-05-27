@@ -43,16 +43,26 @@ class Product(models.Model):
     PRODUCT_TYPES = (
         ("STOCKED", "Producto Almacenable"),
         ("CONSUMABLE", "Materia Prima / Insumo"),
+        ("INTERMEDIATE", "Producto Intermedio / Subreceta"),
         ("FINISHED", "Producto Terminado (Receta)"),
         ("SERVICE", "Servicio"),
     )
 
     UOM_CHOICES = (
-        ("NIU", "Unidades (NIU)"),
-        ("KGM", "Kilogramos (KGM)"),
-        ("LTR", "Litros (LTR)"),
-        ("MTR", "Metros (MTR)"),
-        ("ZZ", "Servicio (ZZ)"),
+        ("NIU", "Unidad"),
+        ("CAJ", "Caja"),
+        ("FARD", "Fardo"),
+        ("PAA", "Paquete"),
+        ("SAC", "Saco"),
+        ("LTR", "Litro"),
+        ("KGM", "Kilogramo"),
+        ("MIL", "Millar"),
+        ("GLN", "Galón"),
+        ("BLS", "Bolsa"),
+        ("LATA", "Lata"),
+        ("BT", "Botella"),
+        ("ZZ", "Servicio"),
+        ("RLL", "Rollo"),
     )
 
     name = models.CharField(max_length=200)
@@ -75,6 +85,26 @@ class Product(models.Model):
     sku = models.CharField(max_length=50, unique=True, blank=True)
 
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    colab_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Precio especial(Opcional)",
+    )
+
+    is_group = models.BooleanField(
+        default=False,
+        help_text="¿Es un botón agrupador visual? (Ej: El botón 'GASEOSAS')",
+    )
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="variants",
+        help_text="Si este producto es una variante, selecciona el grupo padre aquí.",
+    )
 
     is_active = models.BooleanField(default=True)
     is_sellable = models.BooleanField(default=True)
@@ -88,31 +118,35 @@ class Product(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # 🔥 REGLA DE NEGOCIO: SOFT DELETE
-    # Si alguien intenta hacer product.delete(), solo lo inhabilitamos.
     def delete(self, *args, **kwargs):
         self.is_active = False
         self.save()
         return (
             1,
             {"inventory.Product": 1},
-        )  # Simulamos la respuesta de borrado de Django
+        )
 
     def save(self, *args, **kwargs):
         if not self.sku:
             prefix_map = {
                 "STOCKED": "PRO",
                 "CONSUMABLE": "INS",
+                # 👇 Asignamos prefijo a las subrecetas 👇
+                "INTERMEDIATE": "SUB",
                 "FINISHED": "TER",
                 "SERVICE": "SRV",
             }
             prefix = prefix_map.get(self.product_type, "GEN")
             self.sku = generate_sku(prefix=prefix)
 
+        # Reglas automáticas según el tipo
         if self.product_type == "FINISHED":
             self.has_recipe = True
             self.is_purchasable = False
-        if self.product_type == "SERVICE":
+        elif self.product_type == "INTERMEDIATE":
+            self.has_recipe = True
+            self.is_purchasable = False
+        elif self.product_type == "SERVICE":
             self.manage_stock = False
             self.unit_of_measure = "ZZ"
 
@@ -122,18 +156,21 @@ class Product(models.Model):
         return f"[{self.sku}] {self.name}"
 
 
-# --- 3. RECETA ---
+# --- 3. RECETA (Lista de Materiales - BOM) ---
 class ProductRecipe(models.Model):
+    # 👇 Se quitó el limit_choices_to estricto para permitir multiniveles
     finished_product = models.ForeignKey(
         Product,
         related_name="recipe_ingredients",
         on_delete=models.CASCADE,
-        limit_choices_to={"has_recipe": True},
+        # Validamos que el "Padre" sea un Terminado o una Subreceta
+        limit_choices_to={"product_type__in": ["FINISHED", "INTERMEDIATE", "STOCKED"]},
     )
     ingredient = models.ForeignKey(
         Product,
         related_name="used_in_recipes",
         on_delete=models.PROTECT,
+        # Validamos que el "Hijo" gestione stock (no puedes hacer una pizza con un "Servicio")
         limit_choices_to={"manage_stock": True},
     )
     quantity = models.DecimalField(max_digits=10, decimal_places=4)
@@ -141,30 +178,29 @@ class ProductRecipe(models.Model):
     class Meta:
         unique_together = ("finished_product", "ingredient")
 
+    def __str__(self):
+        return (
+            f"{self.quantity} x {self.ingredient.name} -> {self.finished_product.name}"
+        )
 
-# --- 4. STOCK ACTUAL POR SEDE (El interruptor local) ---
+
+# --- 4. STOCK ACTUAL POR SEDE ---
 class Stock(models.Model):
     product = models.ForeignKey(
         Product, related_name="stocks", on_delete=models.CASCADE
     )
     branch = models.ForeignKey(Branch, related_name="stocks", on_delete=models.CASCADE)
 
-    # 🔥 REGLA DE NEGOCIO: ¿Se vende en esta sede?
     is_active = models.BooleanField(
         default=True, help_text="Habilita/Deshabilita el producto solo para esta sede"
     )
-
     quantity = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
-
-    # 🔥 REGLA DE NEGOCIO: Stock Mínimo por Sede
     min_stock = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
-
     average_cost = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("product", "branch")
-        # 🔥 REGLA DE NEGOCIO: Bloqueo en Base de Datos para evitar negativos
         constraints = [
             models.CheckConstraint(
                 check=models.Q(quantity__gte=0), name="prevent_negative_stock"
@@ -184,6 +220,8 @@ class InventoryAdjustment(models.Model):
         ("ADJUST_IN", "Ajuste de Entrada (Sobrante)"),
         ("ADJUST_OUT", "Ajuste de Salida (Faltante)"),
         ("INITIAL", "Inventario Inicial"),
+        # 👇 NUEVO: Para fabricar subrecetas (Ej: Preparar 10Kg de Masa) 👇
+        ("PRODUCTION", "Orden de Producción"),
     )
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
     type = models.CharField(max_length=20, choices=ADJUSTMENT_TYPES)
@@ -241,18 +279,18 @@ class TransferDetail(models.Model):
 
 # --- 7. KARDEX (EL LIBRO MAYOR INMUTABLE) ---
 class Kardex(models.Model):
-    # 🔥 REGLA DE NEGOCIO: Tipos de Movimiento Exactos
     MOVEMENT_TYPES = (
         ("IN_PURCHASE", "Entrada por Compra"),
         ("IN_ADJUSTMENT", "Ajuste de Entrada"),
         ("IN_TRANSFER", "Transferencia de Entrada"),
         ("IN_RETURN", "Devolución por Merma"),
-        ("IN_PRODUCTION", "Entrada por Producción"),
+        ("IN_PRODUCTION", "Entrada por Producción (Subreceta)"),  # 👈
         ("OUT_SALE", "Salida por Venta"),
         ("OUT_MERMA", "Salida por Merma"),
         ("OUT_ADJUSTMENT", "Ajuste de Salida"),
         ("OUT_TRANSFER", "Transferencia de Salida"),
         ("OUT_RECIPE", "Salida por Consumo de Receta"),
+        ("OUT_PRODUCTION", "Salida a Producción"),  # 👈 Para los insumos consumidos
         ("OUT_RETURN", "Salida por Devolución a Proveedor"),
     )
 
@@ -275,7 +313,6 @@ class Kardex(models.Model):
     reference_document = models.CharField(max_length=100, blank=True)
     description = models.CharField(max_length=255, blank=True)
 
-    # 🔥 REGLA DE NEGOCIO: INMUTABILIDAD TOTAL
     def delete(self, *args, **kwargs):
         raise ValidationError(
             "¡ALERTA CRÍTICA! El Kardex es un documento financiero inmutable. Está estrictamente prohibido eliminar registros."

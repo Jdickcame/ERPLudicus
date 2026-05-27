@@ -556,6 +556,13 @@ const InventoryPage = () => {
                   onChange={(e) => setAdjType(e.target.value)}
                   className="w-full p-2 bg-slate-50 border border-slate-200 rounded text-sm focus:ring-2 focus:ring-orange-500 outline-none"
                 >
+                  {/* 👇 NUEVO GRUPO DE PRODUCCIÓN 👇 */}
+                  <optgroup label="Cocina / Fabricación">
+                    <option value="PRODUCTION">
+                      👨‍🍳 Orden de Producción (Preparar Receta)
+                    </option>
+                  </optgroup>
+
                   <optgroup label="Salidas">
                     <option value="MERMA_OUT">Salida por Merma / Rotura</option>
                     <option value="INTERNAL">Consumo Interno</option>

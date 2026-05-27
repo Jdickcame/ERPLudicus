@@ -42,7 +42,8 @@ const NewAdjustment = () => {
           (p: Product) =>
             p.product_type === "STOCKED" ||
             p.product_type === "CONSUMABLE" ||
-            p.product_type === "FINISHED",
+            p.product_type === "FINISHED" ||
+            p.product_type === "INTERMEDIATE",
         );
         setProducts(filtered);
       })
@@ -139,6 +140,13 @@ const NewAdjustment = () => {
               onChange={(e) => setType(e.target.value)}
               className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-orange-500 transition"
             >
+              {/* 👇 NUEVO GRUPO DE PRODUCCIÓN 👇 */}
+              <optgroup label="Cocina / Fabricación (BOM)">
+                <option value="PRODUCTION">
+                  👨‍🍳 Orden de Producción (Preparar Receta/Subreceta)
+                </option>
+              </optgroup>
+
               <optgroup label="Salidas (Disminuye Stock)">
                 <option value="MERMA_OUT">
                   Salida por Merma / Vencimiento / Rotura

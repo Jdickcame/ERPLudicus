@@ -1,13 +1,13 @@
 import {
-    ArrowDownToLine,
-    ArrowRightLeft,
-    CheckCircle,
-    Clock,
-    Package,
-    Plus,
-    Send,
-    Trash2,
-    X,
+  ArrowDownToLine,
+  ArrowRightLeft,
+  CheckCircle,
+  Clock,
+  Package,
+  Plus,
+  Send,
+  Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
@@ -320,7 +320,12 @@ const TransfersPage = () => {
                           </span>
                         </td>
                         <td className="p-3 text-center font-bold text-blue-600">
-                          {item.quantity}
+                          {item.quantity}{" "}
+                          {/* Buscamos la unidad de medida en el stock local */}
+                          <span className="text-xs text-slate-500 font-normal">
+                            {localStock.find((s) => s.product === item.product)
+                              ?.product_uom || "UND"}
+                          </span>
                         </td>
                         <td className="p-3 text-right">
                           <button

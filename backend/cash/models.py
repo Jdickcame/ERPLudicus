@@ -1,32 +1,57 @@
+import uuid  # 👈 Importante para el modo offline
+
 from branches.models import Branch
 from django.conf import settings
 from django.db import models
+
+# 👇 IMPORTACIÓN NECESARIA PARA LAS CATEGORÍAS 👇
+from inventory.models import Category
 
 
 class CashRegister(models.Model):
     """
     Representa el 'Punto de Venta' físico o lógico.
-    Ej: 'Caja Principal', 'Caja Barra', 'Caja Delivery'.
+    Ej: 'Caja Barra' (Usa B001/F001), 'Caja Delivery' (Usa B002/F002).
     """
 
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE)
     name = models.CharField(max_length=50)
+
+    # Series independientes por caja
+    boleta_series = models.CharField(
+        max_length=4, default="B001", help_text="Ej: B001, B002"
+    )
+    factura_series = models.CharField(
+        max_length=4, default="F001", help_text="Ej: F001, F002"
+    )
+
+    # 👇 EL CANDADO: Relación con Categorías 👇
+    allowed_categories = models.ManyToManyField(
+        Category,
+        blank=True,
+        help_text="Selecciona qué categorías se pueden vender aquí. Si lo dejas vacío, vende todo.",
+    )
+    # 👆 ----------------------------------- 👆
+
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
-        return f"{self.name} - {self.branch.name}"
+        return f"{self.name} - {self.branch.name} ({self.boleta_series}/{self.factura_series})"
 
 
 class CashShift(models.Model):
     """
     Representa un TURNO o SESIÓN de caja.
-    Empieza cuando el cajero hace 'Apertura' y termina con el 'Cierre'.
     """
 
     STATUS_CHOICES = [
         ("OPEN", "Abierta"),
         ("CLOSED", "Cerrada"),
     ]
+
+    # CAMPOS OFFLINE
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    is_synced = models.BooleanField(default=True)
 
     cash_register = models.ForeignKey(CashRegister, on_delete=models.PROTECT)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
@@ -35,12 +60,11 @@ class CashShift(models.Model):
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
 
-    # Dinero
+    # Dinero (Control de la Gaveta Física)
     initial_balance = models.DecimalField(
         max_digits=10, decimal_places=2, verbose_name="Saldo Inicial"
     )
 
-    # Estos se llenan al cerrar caja:
     final_balance_system = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -69,8 +93,7 @@ class CashShift(models.Model):
 
 class CashMovement(models.Model):
     """
-    Cualquier entrada o salida de dinero de la caja.
-    Puede ser automática (Ventas) o manual (Gastos, Retiros).
+    Cualquier entrada o salida de dinero de la gaveta de efectivo.
     """
 
     TYPE_CHOICES = [
@@ -79,16 +102,35 @@ class CashMovement(models.Model):
     ]
 
     CONCEPT_CHOICES = [
-        ("SALE", "Venta"),  # Automático
+        ("SALE", "Venta Efectivo"),  # Automático
         ("EXPENSE", "Gasto/Compra"),  # Manual (Sacas plata para comprar algo)
-        ("DEPOSIT", "Ingreso Manual"),  # Manual (Metes cambio)
-        ("WITHDRAWAL", "Retiro/Sangría"),  # Manual (El dueño se lleva plata)
+        ("DEPOSIT", "Ingreso Manual"),  # Manual (Metes sencillo/sencillo)
+        ("WITHDRAWAL", "Retiro/Sangría"),  # Manual (El dueño se lleva efectivo)
+        ("REFUND", "Devolución"),  # Automático (Nota de crédito en efectivo)
     ]
+
+    # CAMPOS OFFLINE
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    is_synced = models.BooleanField(default=True)
 
     shift = models.ForeignKey(
         CashShift, related_name="movements", on_delete=models.CASCADE
     )
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="cash_movements",
+    )
+
+    # SEGURIDAD TIPO ALOHA: ¿Quién autorizó sacar plata de la caja?
+    authorized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="authorized_cash_movements",
+        help_text="Usuario supervisor que autorizó el movimiento manual mediante PIN",
+    )
 
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     movement_type = models.CharField(max_length=5, choices=TYPE_CHOICES)
@@ -97,7 +139,6 @@ class CashMovement(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
-    # Opcional: Vincular a una venta específica si viene de ahí
     related_sale = models.ForeignKey(
         "sales.Sale", null=True, blank=True, on_delete=models.SET_NULL
     )

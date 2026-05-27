@@ -7,9 +7,12 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "../../api/axios";
 import { useBranch } from "../../context/BranchContext";
+import { db } from "../../db/database";
+import { BluetoothPrinter } from "../../utils/BluetoothPrinter";
+import { numeroALetras } from "../../utils/numeroALetras";
 import CreditNoteModal from "../sales/components/CreditNoteModal";
 import PosHeader from "./components/PosHeader";
 
@@ -42,18 +45,47 @@ const PosHistory = () => {
 
   const [sales, setSales] = useState<Sale[]>([]);
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
+  const selectedSaleIdRef = useRef<string | number | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Estados de carga para envíos a SUNAT
   const [isSyncing, setIsSyncing] = useState(false);
-  const [isSyncingAll, setIsSyncingAll] = useState(false); // 👈 NUEVO: Estado para envío masivo
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
 
-  // Estado para el modal de anulación (PinPad)
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+
+  const [isPrinting, setIsPrinting] = useState(false);
   const [isVoidModalOpen, setIsVoidModalOpen] = useState(false);
 
-  // 1. Cargar las ventas del día
-  const fetchSales = async () => {
+  const isAndroid = Capacitor.getPlatform() === "android";
+
+  const hoverBtnOrange = !isAndroid ? "hover:bg-orange-200" : "";
+  const hoverSaleCard = !isAndroid
+    ? "hover:bg-slate-50 hover:border-slate-200"
+    : "";
+  const hoverBtnBlue = !isAndroid ? "hover:bg-blue-200" : "";
+  const hoverBtnBlack = !isAndroid ? "hover:bg-black" : "";
+  const hoverBtnRedLight = !isAndroid ? "hover:bg-red-100" : "";
+  const hoverBtnOrangeLight = !isAndroid ? "hover:bg-orange-100" : "";
+  const hoverRowSlate = !isAndroid ? "hover:bg-slate-50" : "";
+
+  const [notification, setNotification] = useState<{
+    type: "error" | "success";
+    text: string;
+  } | null>(null);
+
+  const showMessage = (type: "error" | "success", text: string) => {
+    setNotification({ type, text });
+    setTimeout(() => setNotification(null), 4000);
+  };
+
+  useEffect(() => {
+    selectedSaleIdRef.current = selectedSale?.id || null;
+  }, [selectedSale]);
+
+  const fetchSales = async (isSilent = false) => {
     if (!currentBranch) return;
     setLoading(true);
     try {
@@ -74,56 +106,299 @@ const PosHistory = () => {
 
       setSales(results);
 
-      if (results.length > 0 && !selectedSale) {
-        setSelectedSale(results[0]);
-      } else if (selectedSale) {
-        const updatedSelected = results.find(
-          (s: Sale) => s.id === selectedSale.id,
+      if (selectedSaleIdRef.current) {
+        const found = uniqueSales.find(
+          (s) => s.id === selectedSaleIdRef.current,
         );
-        setSelectedSale(updatedSelected || null);
-      } else {
-        setSelectedSale(null);
+        if (found) {
+          setSelectedSale(found);
+        } else if (uniqueSales.length > 0 && !isSilent) {
+          setSelectedSale(uniqueSales[0]);
+        }
+      } else if (uniqueSales.length > 0 && !isSilent) {
+        setSelectedSale(uniqueSales[0]);
       }
     } catch (error) {
-      console.error("Error cargando historial", error);
+      setIsOfflineMode(true);
+      const localSalesRaw = await db.sales
+        .filter((s) => s.sync_status !== "SYNCED")
+        .toArray();
+      const pendingSalesFormatted: Sale[] = await Promise.all(
+        localSalesRaw.map(async (s: any) => {
+          const customer = s.payload.customer
+            ? await db.customers.get(s.payload.customer)
+            : null;
+          const details = await Promise.all(
+            s.payload.details.map(async (d: any, idx: number) => {
+              const prod = await db.products.get(d.product);
+              return {
+                id: idx,
+                product_name: prod ? prod.name : "Producto",
+                quantity: d.quantity,
+                price: d.price,
+                subtotal: (d.quantity * parseFloat(d.price)).toFixed(2),
+              };
+            }),
+          );
+          const [series, number] = s.local_invoice_number
+            ? s.local_invoice_number.split("-")
+            : ["L", s.uuid.substring(0, 6)];
+          return {
+            id: s.uuid,
+            series,
+            number,
+            total: s.total.toString(),
+            date: s.date,
+            status: "PENDING",
+            invoice_type_code: s.payload.invoice_type_code,
+            client_name: customer ? customer.name : "PÚBLICO GENERAL",
+            sunat_status: "OFFLINE",
+            details,
+            discount_amount: s.payload.discount_amount || 0,
+            discount_reason: s.payload.discount_reason || "",
+          };
+        }),
+      );
+
+      const cachedSales = JSON.parse(
+        localStorage.getItem("pos_sales_cache") || "[]",
+      );
+      const combinedSales = [...pendingSalesFormatted, ...cachedSales];
+
+      const uniqueMap = new Map();
+      combinedSales.forEach((sale) => uniqueMap.set(sale.id, sale));
+      const uniqueSales = Array.from(uniqueMap.values());
+      uniqueSales.sort(
+        (a: any, b: any) =>
+          new Date(b.date).getTime() - new Date(a.date).getTime(),
+      );
+
+      setSales(uniqueSales);
+
+      if (selectedSaleIdRef.current) {
+        const found = uniqueSales.find(
+          (s) => s.id === selectedSaleIdRef.current,
+        );
+        if (found) setSelectedSale(found);
+      } else if (uniqueSales.length > 0 && !isSilent) {
+        setSelectedSale(uniqueSales[0]);
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  const handleManualRefresh = async () => {
+    setIsManualRefreshing(true);
+    await fetchSales(false);
+    setIsManualRefreshing(false);
+    showMessage("success", "Lista actualizada.");
+  };
+
+  const handleManualRefresh = async () => {
+    setIsManualRefreshing(true);
+    await fetchSales(false);
+    setIsManualRefreshing(false);
+    showMessage("success", "Lista actualizada.");
+  };
+
   useEffect(() => {
     fetchSales();
+    const interval = setInterval(() => fetchSales(true), 15000);
+    return () => clearInterval(interval);
   }, [currentBranch]);
 
-  // 2. Función de impresión silenciosa
-  const handlePrint = async (saleId: number) => {
+  const handlePrint = async (saleId: number | string) => {
+    if (isPrinting) return;
+    setIsPrinting(true);
+
     try {
-      const response = await api.get(`/sales/sales/${saleId}/print/`, {
-        responseType: "blob",
-      });
-      const pdfBlob = new Blob([response.data], { type: "application/pdf" });
-      const pdfUrl = window.URL.createObjectURL(pdfBlob);
+      const saleToPrint = sales.find((s) => s.id === saleId);
+      if (!saleToPrint) throw new Error("Venta no encontrada en la memoria.");
 
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = pdfUrl;
-      document.body.appendChild(iframe);
+      let customerName = saleToPrint.client_name || "PÚBLICO GENERAL";
+      let customerDoc = "-";
+      let address = "-";
+      let items: any[] = [];
+      let paymentStr = "EFECTIVO";
+      let invoiceNumber = `${saleToPrint.series}-${String(
+        saleToPrint.number || "",
+      ).padStart(8, "0")}`;
+      let typeCode = saleToPrint.invoice_type_code || "03";
+      let totalValue = Number(saleToPrint.total);
+      let dateStr = new Date(saleToPrint.date).toLocaleString("es-PE");
 
-      iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
+      if (typeof saleId === "string") {
+        const localSale = await db.sales.get(saleId);
+        if (localSale) {
+          if (localSale.payload.customer) {
+            const c = await db.customers.get(localSale.payload.customer);
+            if (c) {
+              customerName = c.name;
+              customerDoc = c.tax_id;
+              address = c.address || "-";
+            }
+          }
+          if (customerDoc === "-" && localSale.payload.customer_document) {
+            customerDoc = localSale.payload.customer_document;
+          }
+          const rawMethod =
+            localSale.payload.payments?.[0]?.method ||
+            localSale.payload.payments?.[0]?.payment_method ||
+            "CASH";
+          paymentStr =
+            rawMethod === "CARD"
+              ? "VISA/YAPE"
+              : rawMethod === "TRANSFER"
+              ? "TRANSFERENCIA"
+              : rawMethod === "PAGO_LINK"
+              ? "PAGO LINK"
+              : "EFECTIVO";
+          invoiceNumber = localSale.local_invoice_number;
+        }
+      } else {
+        const serverSale = saleToPrint as any;
+        customerDoc =
+          serverSale.customer_document || serverSale.client_doc || "-";
+
+        if (
+          customerDoc === "-" &&
+          serverSale.customer &&
+          typeof serverSale.customer === "object"
+        ) {
+          customerDoc =
+            serverSale.customer.tax_id || serverSale.customer.document || "-";
+          address = serverSale.customer.address || "-";
+        }
+
+        if (serverSale.payments && serverSale.payments.length > 0) {
+          const rawMethod =
+            serverSale.payments[0].payment_method ||
+            serverSale.payments[0].method ||
+            "CASH";
+          paymentStr =
+            rawMethod === "CARD"
+              ? "VISA/YAPE"
+              : rawMethod === "TRANSFER"
+              ? "TRANSFERENCIA"
+              : rawMethod === "PAGO_LINK"
+              ? "PAGO LINK"
+              : "EFECTIVO";
+        }
+      }
+
+      items = saleToPrint.details.map((d: any) => ({
+        qty: d.quantity,
+        name: d.product_name || "Producto",
+        price: Number(d.price),
+        subtotal: Number(d.subtotal) || d.quantity * Number(d.price),
+      }));
+
+      const subtotalBrutoCarrito = items.reduce(
+        (acc, item) => acc + item.subtotal,
+        0,
+      );
+      const descuentoGlobalAImprimir = Number(saleToPrint.discount_amount || 0);
+
+      const ticketData = {
+        isCourtesy: typeCode === "99",
+        invoiceTypeCode: typeCode,
+        invoiceNumber: invoiceNumber,
+        invoiceTypeLabel:
+          typeCode === "01"
+            ? "FACTURA ELECTRÓNICA"
+            : typeCode === "03"
+            ? "BOLETA DE VENTA ELECTRÓNICA"
+            : "NOTA DE VENTA",
+        date: dateStr,
+        customer: customerName.substring(0, 35),
+        customerDoc: customerDoc,
+        address: address.substring(0, 35),
+        paymentTypeStr: paymentStr,
+        items: items,
+        subtotalBruto: subtotalBrutoCarrito,
+        descuentoGlobal: descuentoGlobalAImprimir,
+        opGravada: totalValue / 1.18,
+        igv: totalValue - totalValue / 1.18,
+        total: totalValue,
+        realValue: totalValue,
+        amountInWords: `${totalValue.toFixed(2)} SOLES`,
+        payments: [{ method: paymentStr, amount: totalValue }],
+        branch: currentBranch
+          ? {
+              name: currentBranch.name,
+              address: currentBranch.address,
+              phone: currentBranch.phone,
+            }
+          : null,
       };
 
-      setTimeout(() => {
-        document.body.removeChild(iframe);
-        window.URL.revokeObjectURL(pdfUrl);
-      }, 60000);
-    } catch (error) {
-      alert("Error al intentar imprimir el ticket.");
+      const isElectron =
+        /electron/i.test(navigator.userAgent) || !!(window as any).electronAPI;
+
+      if (isAndroid) {
+        const isConnected = await BluetoothPrinter.isDeviceConnected();
+        if (!isConnected) {
+          showMessage(
+            "error",
+            "⚠️ Impresora Bluetooth no conectada. Ve a Ajustes.",
+          );
+          setIsPrinting(false);
+          return;
+        }
+        showMessage("success", "Enviando ticket a la impresora...");
+        await BluetoothPrinter.printTicketESC(ticketData);
+      } else if (isElectron) {
+        if (window.electronAPI) {
+          window.electronAPI.printLocalTicket(ticketData);
+          showMessage("success", "Imprimiendo en PC...");
+        }
+      } else {
+        // 👇 AQUI ESTÁ LA MAGIA PARA LA WEB 👇
+        if (typeof saleId === "string") {
+          showMessage(
+            "error",
+            "⚠️ Esta venta es local. Sincroniza con la nube primero para poder descargar el PDF.",
+          );
+          setIsPrinting(false);
+          return;
+        }
+
+        showMessage("success", "Obteniendo PDF del servidor...");
+        // Usamos el mismo endpoint de impresión con papel ticket_80 por defecto
+        const response = await api.get(
+          `/sales/sales/${saleId}/print/?papel=ticket_80`,
+          {
+            responseType: "blob",
+          },
+        );
+
+        const pdfUrl = window.URL.createObjectURL(
+          new Blob([response.data], { type: "application/pdf" }),
+        );
+        const iframe = document.createElement("iframe");
+        iframe.style.display = "none";
+        iframe.src = pdfUrl;
+        document.body.appendChild(iframe);
+        iframe.onload = () => {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        };
+        setTimeout(() => {
+          document.body.removeChild(iframe);
+          window.URL.revokeObjectURL(pdfUrl);
+        }, 60000);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    } catch (error: any) {
+      console.error("Error al preparar ticket:", error);
+      showMessage("error", `❌ Error al imprimir: ${error.message}`);
+    } finally {
+      setIsPrinting(false);
     }
   };
 
-  // 3. Función para imprimir la Nota de Crédito
   const handlePrintCreditNote = async (noteId: number) => {
     try {
       const response = await api.get(`/sales/credit-notes/${noteId}/print/`, {
@@ -167,32 +442,49 @@ const PosHistory = () => {
     }
   };
 
-  // 🔥 5. Enviar a SUNAT (MASIVO)
+  // 🏛️ REENVÍO MANUAL A SUNAT
   const handleSyncAllPending = async () => {
-    // Filtramos las que no son Ticket interno y que NO estén aceptadas
-    const pendingSales = sales.filter(
-      (s) => s.invoice_type_code !== "99" && s.sunat_status !== "ACCEPTED",
+    if (!navigator.onLine || isOfflineMode) {
+      return showMessage(
+        "error",
+        "❌ No hay internet. Conéctate para sincronizar con SUNAT.",
+      );
+    }
+
+    const pendingSunat = sales.filter(
+      (s) =>
+        !["99", "00"].includes(s.invoice_type_code) &&
+        s.sunat_status !== "ACCEPTED" &&
+        typeof s.id === "number",
     );
 
-    if (pendingSales.length === 0) {
-      return alert(
-        "✅ No hay comprobantes pendientes de envío a SUNAT en este turno.",
+    if (pendingSunat.length === 0) {
+      return showMessage(
+        "success",
+        "Todo está sincronizado con SUNAT. No hay pendientes.",
       );
     }
 
     setIsSyncingAll(true);
+    setBulkProgress({ current: 0, total: pendingSunat.length });
+    let currentSync = 0;
+
     try {
-      // Enviamos todas en paralelo
-      await Promise.all(
-        pendingSales.map((sale) =>
-          api.post(`/sales/sales/${sale.id}/send_sunat/`),
-        ),
-      );
-      fetchSales();
+      for (const sale of pendingSunat) {
+        currentSync++;
+        setBulkProgress({ current: currentSync, total: pendingSunat.length });
+        try {
+          await api.post(`/sales/sales/${sale.id}/send_sunat/`);
+        } catch (e) {}
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      fetchSales(true);
+      showMessage("success", "✅ Reenvío a SUNAT completado.");
     } catch (error) {
-      console.error(error);
-      alert(
-        "⚠️ Algunos comprobantes pudieron no enviarse por problemas de conexión. Intente nuevamente.",
+      showMessage(
+        "error",
+        "⚠️ Hubo problemas de conexión durante el envío a SUNAT.",
       );
       fetchSales();
     } finally {
@@ -206,7 +498,31 @@ const PosHistory = () => {
   );
 
   return (
-    <div className="h-screen flex flex-col bg-slate-100 font-sans overflow-hidden">
+    <div className="h-screen flex flex-col bg-slate-100 font-sans overflow-hidden relative">
+      {isOfflineMode && (
+        <div className="absolute top-0 left-0 w-full bg-red-500 text-white text-xs font-bold py-1 flex justify-center items-center gap-2 z-50">
+          <WifiOff size={14} /> Estás trabajando sin conexión a internet.
+          Mostrando caché local.
+        </div>
+      )}
+
+      {notification && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 pointer-events-none">
+          <div
+            className={`text-white px-6 py-3 rounded-xl shadow-2xl font-bold flex items-center gap-2 animate-in slide-in-from-top-4 fade-in ${
+              notification.type === "error" ? "bg-red-600" : "bg-emerald-600"
+            }`}
+          >
+            {notification.type === "error" ? (
+              <AlertTriangle size={18} />
+            ) : (
+              <CheckCircle size={18} />
+            )}
+            {notification.text}
+          </div>
+        </div>
+      )}
+
       <PosHeader />
 
       {isVoidModalOpen && selectedSale && (
@@ -231,18 +547,41 @@ const PosHistory = () => {
               <h2 className="font-black text-slate-700 text-lg flex items-center gap-2">
                 <FileText className="text-blue-600" /> Últimas Ventas
               </h2>
-              <button
-                onClick={handleSyncAllPending}
-                disabled={isSyncingAll}
-                className="bg-orange-100 hover:bg-orange-200 text-orange-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 disabled:opacity-50 active:scale-95"
-                title="Sincronizar todos los documentos pendientes a SUNAT"
-              >
-                <CloudUpload
-                  size={14}
-                  className={isSyncingAll ? "animate-bounce" : ""}
-                />
-                {isSyncingAll ? "ENVIANDO..." : "SYNC PENDIENTES"}
-              </button>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleManualRefresh}
+                  disabled={isManualRefreshing}
+                  className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors active:scale-95 disabled:opacity-50"
+                  title="Actualizar lista de ventas"
+                >
+                  <RefreshCw
+                    size={16}
+                    className={
+                      isManualRefreshing ? "animate-spin text-blue-600" : ""
+                    }
+                  />
+                </button>
+
+                <button
+                  onClick={handleSyncAllPending}
+                  disabled={isSyncingAll || isOfflineMode}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1.5 border shadow-sm ${
+                    isOfflineMode
+                      ? "bg-slate-100 text-slate-400 border-slate-200"
+                      : `bg-orange-50 text-orange-600 border-orange-200 active:scale-95 ${hoverBtnOrange}`
+                  }`}
+                  title="Reenviar a SUNAT"
+                >
+                  <CloudUpload
+                    size={14}
+                    className={isSyncingAll ? "animate-bounce" : ""}
+                  />
+                  {isSyncingAll
+                    ? `ENVIANDO... ${bulkProgress.current}/${bulkProgress.total}`
+                    : "SYNC SUNAT"}
+                </button>
+              </div>
             </div>
 
             <div className="relative">
@@ -358,9 +697,13 @@ const PosHistory = () => {
                           ? "Boleta Electrónica"
                           : "Ticket de Cortesía"}
                     </h2>
-
-                    {/* 👇 NUEVO: Botón Minimalista de SUNAT integrado en el título */}
-                    {selectedSale.invoice_type_code !== "99" && (
+                    {selectedSale.sunat_status === "OFFLINE" ? (
+                      <span className="text-[10px] px-2.5 py-1 rounded-full uppercase tracking-widest font-black flex items-center gap-1 border bg-slate-100 border-slate-300 text-slate-500">
+                        Pendiente Servidor
+                      </span>
+                    ) : !["99", "00"].includes(
+                        selectedSale.invoice_type_code,
+                      ) ? (
                       <div className="flex items-center gap-2">
                         <span
                           className={`text-[10px] px-2.5 py-1 rounded-full uppercase tracking-widest font-black flex items-center gap-1 border ${
@@ -371,16 +714,16 @@ const PosHistory = () => {
                         >
                           {selectedSale.sunat_status === "ACCEPTED"
                             ? "Aceptado en SUNAT"
-                            : "Standby / Pendiente"}
+                            : "Pendiente en SUNAT"}
                         </span>
 
                         {/* El botón de reintento circular */}
                         {selectedSale.sunat_status !== "ACCEPTED" && (
                           <button
                             onClick={() => handleSendToSunat(selectedSale.id)}
-                            disabled={isSyncing}
-                            className="bg-blue-100 hover:bg-blue-200 text-blue-700 p-1.5 rounded-full transition-colors disabled:opacity-50 active:scale-95"
-                            title="Reintentar Envío a SUNAT"
+                            disabled={isSyncing || isOfflineMode}
+                            className={`bg-blue-100 text-blue-700 p-1.5 rounded-full transition-colors disabled:opacity-50 active:scale-95 active:bg-blue-300 ${hoverBtnBlue}`}
+                            title="Reenviar a SUNAT individualmente"
                           >
                             <RefreshCw
                               size={16}

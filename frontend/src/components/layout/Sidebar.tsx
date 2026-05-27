@@ -4,12 +4,16 @@ import {
   ChefHat,
   ChevronDown,
   ChevronRight,
-  CreditCard,
+  ClipboardList,
+  FilePlus,
   FileText,
   LayoutDashboard,
   LayoutList,
   LogOut,
+  Monitor,
   Package,
+  PackageMinus,
+  PieChart,
   PlusCircle,
   ShoppingBag,
   ShoppingCart,
@@ -90,7 +94,13 @@ const SidebarGroup = ({ label, icon: Icon, children, basePath }: any) => {
 
 // --- COMPONENTE PRINCIPAL SIDEBAR ---
 
-const Sidebar = () => {
+const Sidebar = ({
+  isOpen,
+  setIsOpen,
+}: {
+  isOpen?: boolean;
+  setIsOpen?: (val: boolean) => void;
+}) => {
   const { user, logout } = useAuth();
 
   const check = (module: string, submodule?: string) => {
@@ -120,9 +130,19 @@ const Sidebar = () => {
   // 2. Tesorería
   const showTreasuryGroup =
     check("purchases", "payable") || check("purchases", "budgets");
+  const showEventsGroup =
+    check("sales", "list") || user?.role === "ADMIN" || user?.is_superuser;
+
+  const showReportsGroup =
+    check("sales", "list") || check("cash") || check("inventory", "list");
 
   return (
-    <aside className="w-64 bg-slate-900 text-white flex flex-col shadow-2xl z-20 h-screen sticky top-0">
+    <aside
+      className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-900 text-white flex flex-col shadow-2xl h-screen transition-transform duration-300 ease-in-out 
+      md:relative md:translate-x-0 ${
+        isOpen ? "translate-x-0" : "-translate-x-full"
+      }`}
+    >
       {/* Cabecera */}
       <div className="p-6 border-b border-slate-800 bg-slate-900">
         <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 tracking-tight">
@@ -136,7 +156,15 @@ const Sidebar = () => {
         </div>
       </div>
 
-      {/* Navegación */}
+        {/* Botón cerrar (Solo visible en móvil) */}
+        <button
+          className="md:hidden text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+          onClick={() => setIsOpen && setIsOpen(false)}
+        >
+          <X size={20} />
+        </button>
+      </div>
+
       <nav className="flex-1 p-4 overflow-y-auto custom-scrollbar space-y-1">
         <div className="mb-4">
           <p className="px-3 mb-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
@@ -171,7 +199,18 @@ const Sidebar = () => {
               />
             )}
             {check("cash") && (
-              <SidebarItem to="/cash" icon={Banknote} label="Gestión de Caja" />
+              <>
+                <SidebarItem
+                  to="/cash/audit"
+                  icon={Banknote}
+                  label="Auditoría de Cajas"
+                />
+                <SidebarItem
+                  to="/cash/registers"
+                  icon={Monitor}
+                  label="Gestión de Cajas"
+                />
+              </>
             )}
           </SidebarGroup>
         )}
@@ -182,6 +221,24 @@ const Sidebar = () => {
             icon={ShoppingBag}
             basePath="/purchases"
           >
+            {check("purchases", "create") && (
+              <SidebarItem
+                to="/purchases/orders/new"
+                icon={FilePlus}
+                label="Nueva Orden (OC)"
+                exact={true}
+              />
+            )}
+            {check("purchases", "list") && (
+              <SidebarItem
+                to="/purchases/orders"
+                icon={ClipboardList}
+                label="Órdenes de Compra"
+                exact={true}
+              />
+            )}
+
+            {/* RUTAS DE FACTURACIÓN DIRECTA Y LISTADOS */}
             {check("purchases", "create") && (
               <SidebarItem
                 to="/purchases/new"
@@ -236,6 +293,29 @@ const Sidebar = () => {
                 to="/inventory/recipes"
                 icon={ChefHat}
                 label="Gestor de Recetas"
+              />
+            )}
+          </SidebarGroup>
+        )}
+
+        {showReportsGroup && (
+          <SidebarGroup
+            label="Reportes y Analíticas"
+            icon={BarChart3}
+            basePath="/reports"
+          >
+            {check("sales", "list") && (
+              <SidebarItem
+                to="/reports/product-sales"
+                icon={PieChart}
+                label="Productos Vendidos"
+              />
+            )}
+            {check("inventory", "list") && (
+              <SidebarItem
+                to="/reports/mermas"
+                icon={PackageMinus}
+                label="Reporte de Mermas"
               />
             )}
           </SidebarGroup>

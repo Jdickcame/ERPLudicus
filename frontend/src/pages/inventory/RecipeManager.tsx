@@ -70,12 +70,17 @@ const RecipeManager = () => {
     fetchRecipe();
   }, [selectedFinishedProduct]);
 
-  // Filtramos los productos para los Selects
+  // Filtramos los productos que PUEDEN TENER una receta (Padres)
   const finishedProducts = products.filter(
-    (p) => p.product_type === "FINISHED",
+    (p) => p.product_type === "FINISHED" || p.product_type === "INTERMEDIATE",
   );
+
+  // Filtramos los productos que pueden USARSE como ingredientes (Hijos)
   const ingredients = products.filter(
-    (p) => p.product_type === "STOCKED" || p.product_type === "CONSUMABLE",
+    (p) =>
+      p.product_type === "STOCKED" ||
+      p.product_type === "CONSUMABLE" ||
+      p.product_type === "INTERMEDIATE",
   );
 
   // 3. Agregar un ingrediente a la receta
@@ -153,7 +158,7 @@ const RecipeManager = () => {
           {/* Tarjeta 1: Seleccionar Producto */}
           <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
             <label className="block text-sm font-bold text-slate-700 mb-2">
-              1. Selecciona un Producto Terminado
+              1. Selecciona un Producto a Preparar
             </label>
             <select
               className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:ring-2 focus:ring-purple-500 outline-none transition"

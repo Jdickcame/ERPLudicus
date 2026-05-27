@@ -13,7 +13,6 @@ import {
   RefreshCw,
   Save,
   Trash2,
-  Wallet,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -21,6 +20,21 @@ import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
 import SearchableSelect from "../../components/common/SearchableSelect";
 import { useBranch } from "../../context/BranchContext";
+
+// --- CONSTANTES ---
+const INVOICE_UNIT_OPTIONS = [
+  { value: "UNIDAD", label: "Unidad (NIU)" },
+  { value: "CAJA", label: "Caja (CX)" },
+  { value: "FARDO", label: "Fardo (FD)" },
+  { value: "PAQUETE", label: "Paquete (PK)" },
+  { value: "SACO", label: "Saco (SA)" },
+  { value: "LITRO", label: "Litros (LTR)" },
+  { value: "KILO", label: "Kilos (KGM)" },
+  { value: "MILLAR", label: "Millar (MIL)" },
+  { value: "GALON", label: "Galón (GLN)" },
+  { value: "BOLSA", label: "Bolsa (BLS)" },
+  { value: "SERVICIO", label: "Servicio (SRV)" },
+];
 
 interface Option {
   value: string | number;
@@ -30,6 +44,7 @@ interface Product {
   id: number;
   name: string;
   sku: string;
+  uom_display?: string;
   last_cost?: number | string;
 }
 
@@ -39,6 +54,8 @@ interface PurchaseDetail {
   description: string;
   category: string | number;
   area: string | number;
+  invoice_unit: string;
+  multiplier: number;
   quantity: number | string;
   unit_value: number | string;
   total_value: number | string;
@@ -59,7 +76,6 @@ const EditPurchase = () => {
 
   // --- ESTADOS DE CARGA ---
   const [loadingData, setLoadingData] = useState(true);
-  const [supplierBalance, setSupplierBalance] = useState(0);
 
   // --- ESTADOS DE OPCIONES ---
   const [docTypeOptions, setDocTypeOptions] = useState<Option[]>([]);
@@ -67,16 +83,7 @@ const EditPurchase = () => {
   const [categories, setCategories] = useState<any[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [areaOptions, setAreaOptions] = useState<Option[]>([]);
-  const [paymentConditionOptions, setPaymentConditionOptions] = useState<
-    Option[]
-  >([]);
-  const [paymentStatusOptions, setPaymentStatusOptions] = useState<Option[]>(
-    [],
-  );
   const [costTypeOptions, setCostTypeOptions] = useState<Option[]>([]);
-  const [paymentMethodOptions, setPaymentMethodOptions] = useState<Option[]>(
-    [],
-  );
   const [budgets, setBudgets] = useState<BudgetStatus[]>([]);
 
   // --- ESTADOS DEL PROVEEDOR ---
@@ -96,7 +103,7 @@ const EditPurchase = () => {
 
   const [initialDate, setInitialDate] = useState("");
 
-  // --- CABECERA ---
+  // --- CABECERA LIMPIA ---
   const [header, setHeader] = useState({
     document_type: "FACTURA",
     series: "",
@@ -104,10 +111,7 @@ const EditPurchase = () => {
     issue_date: "",
     due_date: "",
     budget_period: "",
-    payment_condition: "CASH",
-    payment_status: "PAID",
     cost_type: "CF",
-    payment_method: "TRANSFER",
   });
 
   const [details, setDetails] = useState<PurchaseDetail[]>([]);
@@ -152,21 +156,19 @@ const EditPurchase = () => {
 
         const [budgetsRes, choicesRes, catRes, prodRes] = await Promise.all([
           api.get(
-            `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${loadedPeriod}`,
+            `/treasury/budgets/status/?branch_id=${currentBranch.id}&month=${loadedPeriod}`,
           ),
           api.get("/purchases/purchases/choices/"),
           api.get("/purchases/categories/"),
-          api.get("/inventory/products/"),
+          api.get("/inventory/products/?page_size=1000"),
         ]);
 
         setBudgets(budgetsRes.data);
         setDocTypeOptions(choicesRes.data.document_types || []);
         setIgvOptions(choicesRes.data.igv_rates || []);
         setAreaOptions(choicesRes.data.areas || []);
-        setPaymentConditionOptions(choicesRes.data.payment_conditions || []);
-        setPaymentStatusOptions(choicesRes.data.payment_status || []);
         setCostTypeOptions(choicesRes.data.cost_types || []);
-        setPaymentMethodOptions(choicesRes.data.payment_methods || []);
+
         setCategories(catRes.data.results || catRes.data);
         setProducts(
           Array.isArray(prodRes.data) ? prodRes.data : prodRes.data.results,
@@ -179,10 +181,7 @@ const EditPurchase = () => {
           issue_date: data.issue_date,
           budget_period: loadedPeriod,
           due_date: data.due_date || "",
-          payment_condition: data.payment_condition,
-          payment_status: data.payment_status,
           cost_type: data.cost_type || "CF",
-          payment_method: data.payment_method || "TRANSFER",
         });
 
         setInitialDate(data.issue_date);
@@ -194,16 +193,7 @@ const EditPurchase = () => {
         setSupplierName(data.supplier_name);
         setRucSearch(data.supplier_tax_id || "");
 
-        if (data.supplier) {
-          try {
-            const supplierRes = await api.get(
-              `/purchases/suppliers/${data.supplier}/`,
-            );
-            setSupplierBalance(parseFloat(supplierRes.data.balance) || 0);
-          } catch (err) {
-            console.error("Error saldo proveedor", err);
-          }
-        }
+        // ❌ Eliminada la búsqueda de saldo detallado de tesorería ❌
 
         setExtraTaxType(data.extra_tax_type || "NONE");
         setExtraTaxRate(Number(data.extra_tax_rate) || 0);
@@ -218,6 +208,8 @@ const EditPurchase = () => {
             description: d.description,
             category: d.category || "",
             area: d.area || "",
+            invoice_unit: d.invoice_unit || "UNIDAD",
+            multiplier: Number(d.multiplier) || 1,
             quantity: Number(d.quantity),
             unit_value: Number(d.unit_value),
             total_value: Number(d.total_value),
@@ -239,14 +231,14 @@ const EditPurchase = () => {
     if (currentBranch && header.budget_period) {
       api
         .get(
-          `/purchases/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
+          `/treasury/budgets/status/?branch_id=${currentBranch.id}&month=${header.budget_period}`,
         )
         .then((res) => setBudgets(res.data))
         .catch(console.error);
     }
   }, [header.budget_period, currentBranch]);
 
-  // --- CÁLCULOS ---
+  // --- CÁLCULOS GLOBALES ---
   const subtotal = details.reduce(
     (sum, item) => sum + Number(item.total_value),
     0,
@@ -315,6 +307,8 @@ const EditPurchase = () => {
         description: "",
         category: "",
         area: "",
+        invoice_unit: "UNIDAD",
+        multiplier: 1,
         quantity: 1,
         unit_value: 0,
         total_value: 0,
@@ -339,7 +333,6 @@ const EditPurchase = () => {
       ...header,
       supplier: supplierId,
       branch_id: currentBranch?.id,
-      due_date: header.payment_status === "PENDING" ? header.due_date : null,
       budget_period: `${header.budget_period}-01`,
       currency: currency,
       exchange_rate: currency === "PEN" ? "1.000" : exchangeRate,
@@ -357,8 +350,10 @@ const EditPurchase = () => {
         description: d.description,
         category: d.category || null,
         area: d.area || null,
-        quantity: d.quantity,
-        unit_value: Number(d.unit_value).toFixed(2),
+        invoice_unit: d.invoice_unit,
+        multiplier: Number(d.multiplier),
+        quantity: Number(d.quantity),
+        unit_value: Number(d.unit_value),
         total_value: Number(d.total_value).toFixed(2),
         tax_percentage: d.tax_percentage,
       })),
@@ -381,7 +376,6 @@ const EditPurchase = () => {
     }
   };
 
-  // 🔥 NUEVA VERSIÓN: PANEL ELEGANTE DE PRESUPUESTO
   const renderBudgetAlerts = () => {
     const areaTotals: Record<string, number> = {};
     let hasAreasSelected = false;
@@ -415,7 +409,6 @@ const EditPurchase = () => {
             );
             if (!budget) return null;
 
-            // En Edición, el remaining ya tiene descontado el gasto anterior.
             const futureRemaining = budget.remaining;
             const isExceeded = futureRemaining < 0;
 
@@ -458,7 +451,7 @@ const EditPurchase = () => {
     );
 
   return (
-    <div className="p-6 max-w-6xl mx-auto animate-in fade-in duration-500">
+    <div className="p-6 max-w-7xl mx-auto animate-in fade-in duration-500">
       {/* CABECERA */}
       <div className="flex items-center gap-4 mb-6">
         <button
@@ -504,20 +497,30 @@ const EditPurchase = () => {
             <div className="flex bg-slate-100 p-1 rounded-lg">
               <button
                 onClick={() => setCurrency("PEN")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "PEN" ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                  currency === "PEN"
+                    ? "bg-white text-blue-600 shadow-sm ring-1 ring-slate-200"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
               >
                 S/ Soles
               </button>
               <button
                 onClick={() => setCurrency("USD")}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${currency === "USD" ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-700"}`}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                  currency === "USD"
+                    ? "bg-white text-green-600 shadow-sm ring-1 ring-slate-200"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
               >
                 $ Dólares
               </button>
             </div>
           </div>
           <div
-            className={`transition-opacity duration-200 ${currency === "PEN" ? "opacity-50 grayscale" : "opacity-100"}`}
+            className={`transition-opacity duration-200 ${
+              currency === "PEN" ? "opacity-50 grayscale" : "opacity-100"
+            }`}
           >
             <label className="text-sm font-medium text-slate-700 flex justify-between">
               Tipo de Cambio{" "}
@@ -554,7 +557,7 @@ const EditPurchase = () => {
         </div>
       </div>
 
-      {/* DOCUMENTO (SIN ÁREA NI CATEGORÍA) */}
+      {/* DOCUMENTO (REDUCIDO COMO NEWPURCHASE) */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6 relative z-10">
         <h3 className="text-sm font-bold text-slate-500 uppercase mb-5 border-b pb-3 flex items-center gap-2">
           <FileText size={18} className="text-orange-500" /> Información del
@@ -624,7 +627,7 @@ const EditPurchase = () => {
             />
           </div>
 
-          <div className="md:col-span-3">
+          <div className="md:col-span-4">
             <SearchableSelect
               label="Tipo de Costo"
               options={costTypeOptions}
@@ -634,98 +637,52 @@ const EditPurchase = () => {
               }
             />
           </div>
-          <div className="md:col-span-3">
-            <SearchableSelect
-              label="Método de Pago"
-              options={paymentMethodOptions}
-              value={header.payment_method}
-              onChange={(val) =>
-                setHeader({ ...header, payment_method: val as string })
+
+          <div className="md:col-span-4">
+            <label className="text-xs font-bold text-red-500 flex items-center gap-1 uppercase tracking-wider mb-1">
+              <Calendar size={14} /> Fecha Vencimiento
+            </label>
+            <input
+              type="date"
+              className="w-full border border-red-200 bg-red-50 p-2.5 rounded-lg text-sm font-bold text-red-700 focus:ring-2 focus:ring-red-100 outline-none"
+              value={header.due_date}
+              onChange={(e) =>
+                setHeader({ ...header, due_date: e.target.value })
               }
             />
-          </div>
-          <div className="md:col-span-3">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
-              Condición
-            </label>
-            <select
-              className="w-full border border-slate-300 p-2.5 rounded-lg text-sm bg-white focus:ring-2 focus:ring-orange-100 outline-none"
-              value={header.payment_condition}
-              onChange={(e) =>
-                setHeader({ ...header, payment_condition: e.target.value })
-              }
-            >
-              {paymentConditionOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="md:col-span-3">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
-              Estado Pago
-            </label>
-            <select
-              className={`w-full border p-2.5 rounded-lg text-sm font-bold outline-none transition-colors ${header.payment_status === "PENDING" ? "text-red-600 bg-red-50 border-red-200 focus:ring-red-100" : "text-green-600 bg-green-50 border-green-200 focus:ring-green-100"}`}
-              value={header.payment_status}
-              onChange={(e) =>
-                setHeader({ ...header, payment_status: e.target.value })
-              }
-            >
-              {paymentStatusOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            {header.payment_status === "PENDING" && (
-              <div className="mt-2 animate-in fade-in slide-in-from-top-1">
-                <div className="flex items-center gap-2 bg-red-50 p-2 rounded border border-red-100">
-                  <Calendar size={14} className="text-red-500" />
-                  <span className="text-xs text-red-500 font-bold whitespace-nowrap">
-                    Vence:
-                  </span>
-                  <input
-                    type="date"
-                    className="bg-transparent text-xs font-bold text-red-700 outline-none w-full"
-                    value={header.due_date}
-                    onChange={(e) =>
-                      setHeader({ ...header, due_date: e.target.value })
-                    }
-                  />
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>
 
-      {/* TABLA DETALLES (AHORA CON ÁREA Y CATEGORÍA) */}
-      {/* ✅ CORRECCIÓN 1: overflow-visible para que los menús no se corten */}
+      {/* TABLA DETALLES */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-visible mb-6">
         <table className="w-full text-sm text-left">
           <thead className="bg-slate-50 border-b">
-            <tr className="text-slate-600 font-bold uppercase text-[11px]">
-              <th className="p-4 w-1/4 rounded-tl-lg">
-                Descripción / Producto
-              </th>
-              <th className="p-4 w-1/4">Centro de Costo</th>
-              <th className="p-4 text-center w-20">Cant.</th>
-              <th className="p-4 text-center w-24">P. Unit</th>
-              <th className="p-4 text-center w-20">IGV</th>
-              <th className="p-4 text-right w-28 text-blue-600">Total</th>
-              <th className="p-4 text-center w-12 rounded-tr-lg">Acción</th>
+            <tr className="text-slate-600 font-bold uppercase text-[11px] tracking-tight">
+              <th className="p-4 w-[22%] rounded-tl-lg">Producto / Desc.</th>
+              <th className="p-4 w-[18%]">C. Costo</th>
+              <th className="p-4 w-[15%]">Empaque</th>
+              <th className="p-4 w-[15%] text-center">Cant. & Mult.</th>
+              <th className="p-4 w-[10%] text-center">P. Unit</th>
+              <th className="p-4 w-[8%] text-center">IGV</th>
+              <th className="p-4 w-[12%] text-right text-blue-600">Total</th>
+              <th className="p-4 w-[5%] text-center rounded-tr-lg"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {details.map((row, index) => {
+              const prodSelect = products.find((p) => p.id === row.product_id);
+              const uom = prodSelect?.uom_display || "UND";
+
+              const currentInvQty =
+                Number(row.quantity) * Number(row.multiplier);
+
               const rowTotalWithTax =
                 Number(row.total_value) *
                 (1 + Number(row.tax_percentage) / 100);
+
               return (
                 <tr key={index} className="hover:bg-slate-50 transition-colors">
-                  {/* COL 1: PRODUCTO */}
                   <td className="p-2 align-top">
                     <div className="flex flex-col gap-1 relative">
                       <div className="flex gap-1 items-start">
@@ -750,13 +707,14 @@ const EditPurchase = () => {
                             window.open("/inventory/new", "_blank")
                           }
                           className="bg-slate-100 p-1.5 rounded hover:bg-slate-200 text-slate-600"
+                          title="Crear nuevo producto"
                         >
                           <PackagePlus size={16} />
                         </button>
                       </div>
                       <input
                         type="text"
-                        className="border p-1.5 rounded w-full text-xs"
+                        className="border p-1.5 rounded w-full text-xs outline-none focus:border-blue-400"
                         placeholder={
                           row.product_id
                             ? "Descripción..."
@@ -770,7 +728,6 @@ const EditPurchase = () => {
                     </div>
                   </td>
 
-                  {/* COL 2: CENTRO DE COSTO */}
                   <td className="p-2 align-top">
                     <div className="flex flex-col gap-1">
                       <SearchableSelect
@@ -791,20 +748,65 @@ const EditPurchase = () => {
                     </div>
                   </td>
 
-                  {/* RESTO DE COLUMNAS */}
-                  <td className="p-2 align-top text-center">
-                    <input
-                      type="number"
-                      className="w-full border p-1.5 rounded text-center font-medium outline-none focus:border-blue-400"
-                      value={row.quantity}
+                  <td className="p-2 align-top">
+                    <select
+                      className="w-full border p-2 rounded text-xs outline-none focus:border-blue-400 font-medium text-slate-700 bg-white"
+                      value={row.invoice_unit}
                       onChange={(e) =>
-                        updateRow(index, "quantity", Number(e.target.value))
+                        updateRow(index, "invoice_unit", e.target.value)
                       }
-                    />
+                    >
+                      {INVOICE_UNIT_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
                   </td>
+
+                  <td className="p-2 align-top text-center">
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          step="any"
+                          className="w-full border p-1.5 rounded text-center font-bold outline-none focus:border-blue-400 text-sm text-slate-800"
+                          value={row.quantity}
+                          onChange={(e) =>
+                            updateRow(index, "quantity", Number(e.target.value))
+                          }
+                          title="Cantidad en Factura"
+                        />
+                        <span className="text-xs text-slate-400 font-bold">
+                          x
+                        </span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="w-full border p-1.5 rounded text-center font-bold outline-none focus:border-blue-400 text-sm text-orange-600 bg-orange-50"
+                          value={row.multiplier}
+                          onChange={(e) =>
+                            updateRow(
+                              index,
+                              "multiplier",
+                              Number(e.target.value),
+                            )
+                          }
+                          title="Multiplicador por Empaque"
+                        />
+                      </div>
+                      {row.product_id && (
+                        <div className="text-[10px] text-green-700 font-bold bg-green-50 rounded border border-green-200 p-1 truncate">
+                          = {currentInvQty.toFixed(2)} {uom} al Stock
+                        </div>
+                      )}
+                    </div>
+                  </td>
+
                   <td className="p-2 align-top text-center">
                     <input
                       type="number"
+                      step="any"
                       className="w-full border p-1.5 rounded text-right font-medium outline-none focus:border-blue-400"
                       value={row.unit_value}
                       onChange={(e) =>
@@ -812,6 +814,7 @@ const EditPurchase = () => {
                       }
                     />
                   </td>
+
                   <td className="p-2 align-top text-center">
                     <select
                       className="border p-1.5 rounded w-full text-xs bg-white font-bold text-blue-700 outline-none"
@@ -831,7 +834,8 @@ const EditPurchase = () => {
                       ))}
                     </select>
                   </td>
-                  <td className="p-2 align-top text-right font-bold text-blue-700 bg-blue-50/30 rounded-bl-lg">
+
+                  <td className="p-2 align-top text-right font-bold text-blue-700 bg-blue-50/30">
                     <div className="flex flex-col">
                       <span className="text-[10px] text-slate-400 font-medium tracking-tight">
                         Sub: {Number(row.total_value).toFixed(2)}
@@ -842,6 +846,7 @@ const EditPurchase = () => {
                       </span>
                     </div>
                   </td>
+
                   <td className="p-2 align-middle text-center rounded-br-lg">
                     <button
                       type="button"
@@ -868,12 +873,9 @@ const EditPurchase = () => {
       </div>
 
       {/* TOTALES + IMPUESTOS EXTRA */}
-      {/* ✅ CORRECCIÓN 2: items-start para que el panel izquierdo no se estire hacia abajo si no hay alertas */}
       <div className="flex flex-col md:flex-row justify-between items-start gap-6">
-        {/* ZONA DE ALERTAS (IZQUIERDA) */}
         <div className="w-full md:flex-1">{renderBudgetAlerts()}</div>
 
-        {/* ZONA DE TOTALES (DERECHA) */}
         <div className="w-full md:w-[450px] bg-white p-6 rounded-2xl shadow-xl border border-slate-200">
           <div className="space-y-2 mb-4 text-sm text-slate-600">
             <div className="flex justify-between">
@@ -958,7 +960,11 @@ const EditPurchase = () => {
                   <span className="text-sm font-medium text-slate-700">
                     {extraTaxType === "PERCEPTION"
                       ? "Monto Fijo:"
-                      : `Porcentaje (${extraTaxType === "RETENTION" ? "Retención" : "Detracción"}):`}
+                      : `Porcentaje (${
+                          extraTaxType === "RETENTION"
+                            ? "Retención"
+                            : "Detracción"
+                        }):`}
                   </span>
                   <div className="flex items-center gap-2">
                     {extraTaxType !== "PERCEPTION" && (
@@ -984,7 +990,11 @@ const EditPurchase = () => {
                       <input
                         type="number"
                         step="0.01"
-                        className={`w-24 p-1 pl-6 text-right border rounded font-bold ${extraTaxType === "PERCEPTION" ? "bg-white border-purple-300 text-purple-700" : "bg-slate-100 text-slate-600"}`}
+                        className={`w-24 p-1 pl-6 text-right border rounded font-bold ${
+                          extraTaxType === "PERCEPTION"
+                            ? "bg-white border-purple-300 text-purple-700"
+                            : "bg-slate-100 text-slate-600 cursor-not-allowed"
+                        }`}
                         value={extraTaxAmount}
                         readOnly={extraTaxType !== "PERCEPTION"}
                         onChange={(e) =>
@@ -1016,18 +1026,7 @@ const EditPurchase = () => {
             </div>
           </div>
 
-          {supplierBalance > 0 && header.payment_status === "PAID" && (
-            <div className="mt-4 p-3 bg-green-100 text-green-800 rounded border border-green-300 text-xs flex flex-col gap-1 animate-in slide-in-from-bottom-2">
-              <div className="flex items-center gap-2 font-bold">
-                <Wallet size={16} />
-                <span>Saldo a favor disponible</span>
-              </div>
-              <p>
-                El proveedor tiene{" "}
-                <strong>S/ {supplierBalance.toFixed(2)}</strong> a favor.
-              </p>
-            </div>
-          )}
+          {/* ❌ Eliminada la lógica y el renderizado del panel verde de saldo ❌ */}
 
           <button
             type="button"

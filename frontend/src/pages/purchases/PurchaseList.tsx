@@ -1,9 +1,6 @@
 import {
   ArrowDown,
   ArrowUp,
-  ChevronLeft,
-  ChevronRight,
-  CreditCard,
   Download,
   Edit,
   Eye,
@@ -19,6 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../../api/axios";
 import BranchSelector from "../../components/common/BranchSelector";
+import Pagination from "../../components/common/Pagination";
 import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal";
 import { useBranch } from "../../context/BranchContext";
 
@@ -35,7 +33,6 @@ const PurchaseList = () => {
   const { currentBranch } = useBranch();
   const navigate = useNavigate();
 
-  // ESTADO PARA LAS PESTAÑAS (COMPRAS vs NOTAS)
   const [viewType, setViewType] = useState<"PURCHASES" | "NOTES">("PURCHASES");
 
   // --- ESTADOS DE DATOS ---
@@ -51,10 +48,9 @@ const PurchaseList = () => {
 
   // --- ESTADOS DE PAGINACIÓN Y ORDEN ---
   const [page, setPage] = useState(1);
-  const pageSize = 10;
+  const [pageSize, setPageSize] = useState(10);
   const [ordering, setOrdering] = useState("-issue_date");
 
-  // Estado único y unificado para el Modal
   const [selectedItem, setSelectedItem] = useState<{
     id: number;
     type: "PURCHASES" | "NOTES";
@@ -76,7 +72,6 @@ const PurchaseList = () => {
       if (debouncedSearch) params.search = debouncedSearch;
       if (currencyFilter !== "ALL") params.currency = currencyFilter;
 
-      // El filtro de costo no aplica a las notas
       if (viewType === "PURCHASES" && costTypeFilter !== "ALL") {
         params.cost_type = costTypeFilter;
       }
@@ -99,6 +94,7 @@ const PurchaseList = () => {
   }, [
     currentBranch,
     page,
+    pageSize,
     debouncedSearch,
     currencyFilter,
     costTypeFilter,
@@ -120,7 +116,6 @@ const PurchaseList = () => {
     viewType,
   ]);
 
-  // --- MANEJADORES ---
   const handleSort = (field: string) => {
     if (ordering === field) setOrdering(`-${field}`);
     else if (ordering === `-${field}`) setOrdering(field);
@@ -182,19 +177,6 @@ const PurchaseList = () => {
   };
 
   const totalPages = Math.ceil(totalCount / pageSize);
-
-  const getPaymentMethodLabel = (method: string) => {
-    const methods: Record<string, string> = {
-      CASH: "Efectivo",
-      TRANSFER: "Transfer",
-      CARD: "Tarjeta",
-      YAPE: "Yape",
-      PLIN: "Plin",
-      CHECK: "Cheque",
-      OTHER: "Otro",
-    };
-    return methods[method] || method || "-";
-  };
 
   return (
     <div className="p-6 animate-in fade-in duration-500">
@@ -319,18 +301,6 @@ const PurchaseList = () => {
                   </div>
                 </th>
 
-                {viewType === "PURCHASES" && (
-                  <th
-                    className="px-4 py-3 cursor-pointer hover:bg-slate-100 whitespace-nowrap"
-                    onClick={() => handleSort("payment_method")}
-                  >
-                    <div className="flex items-center">
-                      M. Pago {getSortIcon("payment_method")}
-                    </div>
-                  </th>
-                )}
-
-                {/* 👇 COLUMNAS DE DESGLOSE DE IMPUESTOS RESTAURADAS */}
                 <th className="px-3 py-3 text-right">V. Venta</th>
                 <th className="px-3 py-3 text-right">Gravado</th>
                 <th className="px-3 py-3 text-right">No Grav.</th>
@@ -359,7 +329,7 @@ const PurchaseList = () => {
               {purchases.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={11}
+                    colSpan={10}
                     className="text-center py-10 text-slate-400 text-sm"
                   >
                     No se encontraron registros.
@@ -409,16 +379,6 @@ const PurchaseList = () => {
                         )}
                       </td>
 
-                      {viewType === "PURCHASES" && (
-                        <td className="px-4 py-3 whitespace-nowrap text-slate-600">
-                          <span className="flex items-center gap-1.5 bg-slate-100 px-2 py-1 rounded w-fit">
-                            <CreditCard size={12} className="text-slate-400" />
-                            {getPaymentMethodLabel(purchase.payment_method)}
-                          </span>
-                        </td>
-                      )}
-
-                      {/* 👇 VALORES DE LAS COLUMNAS RESTAURADAS */}
                       <td className="px-3 py-3 text-right text-slate-600">
                         {Number(purchase.subtotal || 0).toFixed(2)}
                       </td>
@@ -502,29 +462,18 @@ const PurchaseList = () => {
         )}
       </div>
 
-      {/* PAGINACIÓN */}
-      <div className="flex justify-between items-center bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-        <div className="text-sm text-slate-500">
-          Página <b>{page}</b> de <b>{totalPages || 1}</b> ({totalCount}{" "}
-          registros)
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setPage((p) => Math.max(p - 1, 1))}
-            disabled={page === 1 || loading}
-            className="p-2 border rounded hover:bg-slate-50 disabled:opacity-50 transition"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <button
-            onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
-            disabled={page === totalPages || totalPages === 0 || loading}
-            className="p-2 border rounded hover:bg-slate-50 disabled:opacity-50 transition"
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
-      </div>
+      <Pagination
+        currentPage={page}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        pageSize={pageSize}
+        loading={loading}
+        onPageChange={(newPage) => setPage(newPage)}
+        onPageSizeChange={(newSize) => {
+          setPageSize(newSize);
+          setPage(1);
+        }}
+      />
 
       {/* MODAL */}
       {selectedItem && (

@@ -8,6 +8,8 @@ from .models import (
     PurchaseDetail,
     PurchaseNote,
     PurchaseNoteDetail,
+    PurchaseOrder,
+    PurchaseOrderDetail,
     Supplier,
 )
 
@@ -21,6 +23,8 @@ class ExpenseCategorySerializer(serializers.ModelSerializer):
 
 # --- 2. Proveedores ---
 class SupplierSerializer(serializers.ModelSerializer):
+    next_due_date = serializers.DateField(read_only=True)
+
     class Meta:
         model = Supplier
         fields = "__all__"
@@ -34,15 +38,17 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
     area_name = serializers.CharField(source="area.name", read_only=True)
 
-    # 👇 ESTA ES LA LÍNEA MÁGICA QUE TE FALTA
-    # Permite que el producto sea opcional (para gastos como pintura/luz)
     product = serializers.PrimaryKeyRelatedField(
         queryset=Product.objects.all(), required=False, allow_null=True
     )
 
-    # Definimos explícitamente los decimales
-    quantity = serializers.DecimalField(max_digits=10, decimal_places=2)
-    unit_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    units_per_package = serializers.DecimalField(
+        max_digits=14, decimal_places=5, default=1.00
+    )
+    quantity = serializers.DecimalField(max_digits=14, decimal_places=5)
+    unit_value = serializers.DecimalField(max_digits=14, decimal_places=5)
+
+    # El total sí se queda en 2 porque representa dinero final
     total_value = serializers.DecimalField(max_digits=12, decimal_places=2)
 
     remaining_quantity = serializers.SerializerMethodField()
@@ -51,14 +57,16 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
         model = PurchaseDetail
         fields = [
             "id",
-            "product",  # Django buscará la definición explícita de arriba
+            "product",
             "product_name",
             "product_sku",
-            "category",  # 👈 NUEVO
-            "category_name",  # 👈 NUEVO
-            "area",  # 👈 NUEVO
-            "area_name",  # 👈 NUEVO
+            "category",
+            "category_name",
+            "area",
+            "area_name",
             "description",
+            "invoice_unit",
+            "units_per_package",
             "quantity",
             "unit_value",
             "total_value",
@@ -92,11 +100,119 @@ class PurchaseDetailSerializer(serializers.ModelSerializer):
         return float(obj.quantity) - float(returned)
 
 
+# =====================================================================
+# --- DETALLE DE ORDEN DE COMPRA ---
+# =====================================================================
+class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+
+    # Propiedades calculadas (Punto 4 de tu guía)
+    quantity_pending = serializers.DecimalField(
+        max_digits=14, decimal_places=5, read_only=True
+    )
+
+    class Meta:
+        model = PurchaseOrderDetail
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_sku",
+            "invoice_unit",
+            "units_per_package",
+            "quantity_ordered",
+            "quantity_received",
+            "quantity_pending",
+            "unit_value",
+            "total_value",
+            "is_bonus",
+        ]
+
+
+# =====================================================================
+# --- ORDEN DE COMPRA (CABECERA) ---
+# =====================================================================
+class PurchaseOrderSerializer(serializers.ModelSerializer):
+    details = PurchaseOrderDetailSerializer(many=True)
+
+    # Datos informativos para la tabla de React
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    supplier_tax_id = serializers.CharField(source="supplier.tax_id", read_only=True)
+    branch_id = serializers.IntegerField(write_only=True)
+
+    class Meta:
+        model = PurchaseOrder
+        fields = [
+            "id",
+            "branch_id",
+            "supplier",
+            "supplier_name",
+            "supplier_tax_id",
+            "user",
+            "code",
+            "delivery_mode",
+            "payment_method",
+            "payment_term",
+            "status",
+            "issue_date",
+            "subtotal",
+            "tax_amount",
+            "total",
+            "notes",
+            "details",
+        ]
+        read_only_fields = ["user", "issue_date", "status"]
+
+    def create(self, validated_data):
+        details_data = validated_data.pop("details")
+        branch_id = validated_data.pop("branch_id")
+        user = self.context["request"].user
+
+        with transaction.atomic():
+            purchase_order = PurchaseOrder.objects.create(
+                user=user, branch_id=branch_id, **validated_data
+            )
+
+            for detail in details_data:
+                PurchaseOrderDetail.objects.create(
+                    purchase_order=purchase_order, **detail
+                )
+
+        return purchase_order
+
+    def update(self, instance, validated_data):
+        # Permite actualizar la OC si está en estado OPEN o PARTIAL
+        details_data = validated_data.pop("details", None)
+
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+
+            if details_data is not None:
+                # Opcional: Podrías hacer un update más inteligente aquí si necesitas
+                # mantener el quantity_received de las filas existentes,
+                # pero para edición de cabecera/cantidades base esto funciona bien.
+                instance.details.all().delete()
+                for detail in details_data:
+                    PurchaseOrderDetail.objects.create(
+                        purchase_order=instance, **detail
+                    )
+
+        return instance
+
+
 # --- 4. Compra (Cabecera) ---
 class PurchaseSerializer(serializers.ModelSerializer):
+    purchase_order = serializers.PrimaryKeyRelatedField(
+        queryset=PurchaseOrder.objects.all(), required=False, allow_null=True
+    )
+    purchase_order_code = serializers.CharField(
+        source="purchase_order.code", read_only=True
+    )
     details = PurchaseDetailSerializer(many=True)
 
-    # --- CAMPOS RELACIONADOS (AQUÍ ESTABA EL ERROR) ---
     supplier_name = serializers.CharField(source="supplier.name", read_only=True)
     supplier_tax_id = serializers.CharField(source="supplier.tax_id", read_only=True)
     supplier_balance = serializers.DecimalField(
@@ -134,6 +250,8 @@ class PurchaseSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "branch_id",
+            "purchase_order",
+            "purchase_order_code",
             "supplier",
             "supplier_name",
             "supplier_tax_id",
@@ -144,7 +262,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "number",
             "issue_date",
             "budget_period",
-            "due_date",  # Nuevo
+            "due_date",
             "registration_date",
             "specific_concept",
             "currency",
@@ -161,12 +279,9 @@ class PurchaseSerializer(serializers.ModelSerializer):
             "retention_amount",
             "detraction_amount",
             "total_net_pay",
-            "payment_condition",
-            "payment_status",  # Nuevo
-            "transaction_number",
+            "payment_status",
             "details",
             "cost_type",
-            "payment_method",
             "gravado",
             "no_gravado",
             "area_total",
@@ -198,7 +313,6 @@ class PurchaseSerializer(serializers.ModelSerializer):
 
         return None
 
-    # 👇 NUEVAS FUNCIONES PARA CALCULAR LÍNEA POR LÍNEA
     def get_gravado(self, obj):
         # Sumamos total_value de detalles que SÍ tienen impuestos (IGV > 0)
         return sum(d.total_value for d in obj.details.all() if d.tax_percentage > 0)
@@ -273,8 +387,11 @@ class PurchaseNoteDetailSerializer(serializers.ModelSerializer):
         queryset=Product.objects.all(), required=False, allow_null=True
     )
 
-    quantity = serializers.DecimalField(max_digits=10, decimal_places=2)
-    unit_value = serializers.DecimalField(max_digits=12, decimal_places=2)
+    units_per_package = serializers.DecimalField(
+        max_digits=14, decimal_places=5, default=1.00
+    )
+    quantity = serializers.DecimalField(max_digits=14, decimal_places=5)
+    unit_value = serializers.DecimalField(max_digits=14, decimal_places=5)
     total_value = serializers.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
@@ -284,11 +401,13 @@ class PurchaseNoteDetailSerializer(serializers.ModelSerializer):
             "product",
             "product_name",
             "product_sku",
-            "category",  # 👈 NUEVO
-            "category_name",  # 👈 NUEVO
-            "area",  # 👈 NUEVO
-            "area_name",  # 👈 NUEVO
+            "category",
+            "category_name",
+            "area",
+            "area_name",
             "description",
+            "invoice_unit",
+            "units_per_package",
             "quantity",
             "unit_value",
             "total_value",

@@ -1,4 +1,3 @@
-# backend/sales/views_pdf.py
 from cash.models import CashShift
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -6,7 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from .models import CreditNote, Sale
-from .pdf_engine import TicketEngine  # 👈 Importamos nuestro motor nuevo
+from .pdf_engine import A4Engine, TicketEngine
 
 
 @api_view(["GET"])
@@ -14,6 +13,8 @@ from .pdf_engine import TicketEngine  # 👈 Importamos nuestro motor nuevo
 def generate_pdf_view(request, pk):
     # 1. PDF DE VENTA
     sale = get_object_or_404(Sale, pk=pk)
+
+    tipo_papel = request.query_params.get("papel", "ticket_80")
 
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = (
@@ -39,16 +40,20 @@ def generate_pdf_view(request, pk):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def generate_nc_pdf_view(request, pk):
-    # 2. PDF DE NOTA DE CRÉDITO
     note = get_object_or_404(CreditNote, pk=pk)
+
+    format_type = request.query_params.get("format", "ticket_80")
 
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = (
         f'inline; filename="{note.series}-{note.number}.pdf"'
     )
 
-    # Usamos el mismo motor, activando modo 'is_note'
-    engine = TicketEngine(response)
+    if format_type == "a4":
+        engine = A4Engine(response)
+    else:
+        engine = TicketEngine(response)
+
     engine.generate(
         note,
         "NOTA DE CRÉDITO",
@@ -61,22 +66,25 @@ def generate_nc_pdf_view(request, pk):
 
 
 @api_view(["GET"])
-@permission_classes(
-    [IsAuthenticated]
-)  # 🔒 Protegido: Necesitamos saber quién es el cajero
+@permission_classes([IsAuthenticated])
 def print_hourly_report_view(request):
-    # 1. Buscar turno abierto de este usuario
-    shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
-    if not shift:
-        return HttpResponse("No tienes un turno de caja abierto.", status=400)
+    # 👇 1. BUSCAMOS SI LA WEB NOS MANDÓ UN TURNO ESPECÍFICO 👇
+    shift_id = request.query_params.get("shift_id")
 
-    # 2. Obtener las ventas válidas del turno
-    sales = Sale.objects.filter(date__gte=shift.opened_at).exclude(status="CANCELED")
+    if shift_id:
+        shift = get_object_or_404(CashShift, pk=shift_id)
+    else:
+        shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
+
+    if not shift:
+        return HttpResponse("No se encontró el turno de caja.", status=400)
+
+    # 👇 2. FILTRAMOS ESTRICTAMENTE POR EL TURNO (Shift) 👇
+    sales = Sale.objects.filter(shift=shift).exclude(status="CANCELED")
 
     if request.user.role != "ADMIN" and request.user.branch:
         sales = sales.filter(branch=request.user.branch)
 
-    # 3. Agrupar la matemática
     hourly_data = {}
     for sale in sales:
         hour = sale.date.hour
@@ -89,7 +97,6 @@ def print_hourly_report_view(request):
         hourly_data[time_label]["gross"] += float(sale.total)
         hourly_data[time_label]["net"] += float(sale.total) / 1.18
 
-    # 4. Enviar al motor PDF
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = 'inline; filename="Reporte_Horas.pdf"'
 
@@ -102,22 +109,27 @@ def print_hourly_report_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def print_pmix_report_view(request):
-    shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
-    if not shift:
-        return HttpResponse("No tienes un turno de caja abierto.", status=400)
+    # 👇 1. BUSCAMOS EL TURNO ESPECÍFICO 👇
+    shift_id = request.query_params.get("shift_id")
 
-    # Solo nos interesan las ventas completadas
+    if shift_id:
+        shift = get_object_or_404(CashShift, pk=shift_id)
+    else:
+        shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
+
+    if not shift:
+        return HttpResponse("No se encontró el turno de caja.", status=400)
+
+    # 👇 2. FILTRAMOS ESTRICTAMENTE POR EL TURNO 👇
     sales = (
-        Sale.objects.filter(date__gte=shift.opened_at)
+        Sale.objects.filter(shift=shift)
         .exclude(status="CANCELED")
         .prefetch_related("details__product")
     )
 
-    # Igual que arriba:
     if request.user.role != "ADMIN" and request.user.branch:
         sales = sales.filter(branch=request.user.branch)
 
-    # Agrupar matemática del PMIX
     pmix_data = {}
     for sale in sales:
         for detail in sale.details.all():
@@ -128,7 +140,6 @@ def print_pmix_report_view(request):
                 pmix_data[name] = 0
             pmix_data[name] += qty
 
-    # Enviar al motor PDF
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = 'inline; filename="Reporte_PMIX.pdf"'
 
@@ -141,14 +152,20 @@ def print_pmix_report_view(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def print_courtesies_report_view(request):
-    # 1. Buscar turno abierto de este usuario
-    shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
-    if not shift:
-        return HttpResponse("No tienes un turno de caja abierto.", status=400)
+    # 👇 1. BUSCAMOS EL TURNO ESPECÍFICO 👇
+    shift_id = request.query_params.get("shift_id")
 
-    # 2. Obtener TODAS las ventas válidas del turno
+    if shift_id:
+        shift = get_object_or_404(CashShift, pk=shift_id)
+    else:
+        shift = CashShift.objects.filter(user=request.user, status="OPEN").first()
+
+    if not shift:
+        return HttpResponse("No se encontró el turno de caja.", status=400)
+
+    # 👇 2. FILTRAMOS ESTRICTAMENTE POR EL TURNO 👇
     sales = (
-        Sale.objects.filter(date__gte=shift.opened_at)
+        Sale.objects.filter(shift=shift)
         .exclude(status="CANCELED")
         .prefetch_related("details__product")
     )
@@ -156,32 +173,26 @@ def print_courtesies_report_view(request):
     if request.user.role != "ADMIN" and request.user.branch:
         sales = sales.filter(branch=request.user.branch)
 
-    # 3. Agrupar matemática de Cortesías (Como si fuera un PMIX)
     courtesy_pmix = {}
     total_costo_asumido = 0.0
 
     for sale in sales:
-        # Filtramos por el código 99 o si marcaste el flag is_courtesy
         if sale.invoice_type_code == "99" or getattr(sale, "is_courtesy", False):
             for d in sale.details.all():
                 name = d.product.name
                 qty = float(d.quantity)
 
-                # Calculamos el costo asumido por línea
                 costo_linea = float(d.price) * qty
                 total_costo_asumido += costo_linea
 
-                # Agrupamos por nombre de producto
                 if name not in courtesy_pmix:
                     courtesy_pmix[name] = 0
                 courtesy_pmix[name] += qty
 
-    # 4. Enviar al motor PDF
     response = HttpResponse(content_type="application/pdf")
     response["Content-Disposition"] = 'inline; filename="Reporte_Cortesias.pdf"'
 
     engine = TicketEngine(response)
-    # Le pasamos el diccionario de productos y el costo total
     engine.generate_courtesies_report(
         courtesy_pmix, total_costo_asumido, shift.opened_at
     )

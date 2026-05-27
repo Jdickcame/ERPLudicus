@@ -1,9 +1,15 @@
 from decimal import Decimal
 
+import openpyxl
 from core.mixins import BranchAccessMixin
 from django.db import transaction
+from django.db.models import Q, Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
-from rest_framework import status, viewsets
+from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -53,22 +59,110 @@ class TagViewSet(viewsets.ModelViewSet):
 
 # --- 2. PRODUCTOS Y RECETAS ---
 class ProductViewSet(BranchAccessMixin, viewsets.ModelViewSet):
-    queryset = Product.objects.filter(is_active=True).prefetch_related(
-        "tags", "category"
-    )
+    def get_queryset(self):
+        from .models import Product
+
+        qs = Product.objects.all().prefetch_related("tags", "category", "stocks")
+
+        is_active = self.request.query_params.get("is_active", "")
+        if is_active == "true":
+            qs = qs.filter(is_active=True)
+
+        branch_id = self.request.query_params.get("branch_id")
+        for_pos = self.request.query_params.get("for_pos")
+        for_purchase = self.request.query_params.get("for_purchase")
+        search = self.request.query_params.get("search")
+
+        # 👇 NUEVO PARÁMETRO: Capturamos la caja 👇
+        cash_register_id = self.request.query_params.get("cash_register_id")
+
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search)
+                | Q(sku__icontains=search)
+                | Q(category__name__icontains=search)
+                | Q(area__name__icontains=search)
+            )
+
+        # 🔥 LA MAGIA DEL CATÁLOGO DINÁMICO 🔥
+        # Si la petición viene para el POS, filtramos estrictamente por la sede
+        if for_pos == "true" and branch_id:
+            qs = qs.filter(
+                product_type__in=[
+                    "STOCKED",
+                    "FINISHED",
+                    "INTERMEDIATE",
+                    "SERVICE",
+                    "CONSUMABLE",
+                ]
+            )
+            qs = qs.filter(
+                stocks__branch_id=branch_id, stocks__is_active=True
+            ).distinct()
+
+            # 👇 EL CANDADO POR CATEGORÍA DE CAJA 👇
+            if cash_register_id:
+                from cash.models import CashRegister
+
+                try:
+                    caja = CashRegister.objects.get(id=cash_register_id)
+                    categorias_permitidas = caja.allowed_categories.all()
+
+                    if categorias_permitidas.count() > 0:
+                        qs = qs.filter(category__in=categorias_permitidas)
+                except CashRegister.DoesNotExist:
+                    pass
+
+        # Si viene un branch_id (desde la pantalla de Catálogo web)
+        elif branch_id:
+            user = self.request.user
+            if hasattr(user, "branch") and user.branch:
+                qs = qs.filter(
+                    stocks__branch_id=branch_id, stocks__is_active=True
+                ).distinct()
+            else:
+                pass  # El Admin ve todo
+
+        if for_purchase == "true":
+            qs = qs.filter(is_purchasable=True)
+            qs = qs.filter(product_type__in=["STOCKED", "CONSUMABLE", "INTERMEDIATE"])
+
+        return qs
+
     serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    search_fields = ["name", "sku", "category__name", "area__name"]
+    ordering_fields = ["name", "sku", "price", "created_at"]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        if request.query_params.get("for_pos") == "true":
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
     def perform_destroy(self, instance):
-        # Usamos el Soft Delete que programamos en el modelo
         instance.delete()
 
     @action(detail=False, methods=["get"])
     def choices(self, request):
-        from .models import Product  # Asegúrate de que el modelo esté importado
+        from .models import Product
 
         def format_opts(choices):
             return [{"value": k, "label": v} for k, v in choices]
@@ -80,13 +174,135 @@ class ProductViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=False, methods=["get"])
+    def debug_products(self, request):
+        from .models import Product
+
+        products = Product.objects.all().values(
+            "id", "name", "product_type", "is_active"
+        )
+        return Response(
+            {
+                "total": products.count(),
+                "products": list(products[:50]),
+            }
+        )
+
+    @action(detail=False, methods=["get"])
+    def export_excel(self, request):
+        queryset = self.filter_queryset(self.get_queryset())
+        branch_id = request.query_params.get("branch_id")
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Catálogo de Productos"
+
+        headers = [
+            "SKU / Código",
+            "Nombre del Producto",
+            "Categoría",
+            "Tipo",
+            "Ud. Medida",
+            "Precio Base (S/)",
+        ]
+
+        if branch_id:
+            headers.extend(["Precio en Sede (S/)", "Estado en Sede"])
+
+        ws.append(headers)
+
+        # 👇 EL TRUCO: Pasamos los datos por tu Serializer para obtener
+        # exactamente la misma data limpia que usa React
+        serializer = self.get_serializer(queryset, many=True)
+
+        for p in serializer.data:
+            precio_base = float(p.get("price") or 0.0)
+
+            row = [
+                p.get("sku") or "-",
+                p.get("name") or "Sin Nombre",
+                p.get("category_name") or "Sin Categoría",
+                p.get("type_display") or p.get("product_type", "-"),
+                p.get("uom_display") or "-",
+                precio_base,
+            ]
+
+            # Lógica dinámica si estamos viendo una sede
+            if branch_id:
+                stock = p.get("stock")
+                if stock:
+                    # Buscamos is_enabled (o is_active como respaldo)
+                    is_enabled = stock.get("is_enabled", stock.get("is_active", False))
+                    estado_sede = "Habilitado" if is_enabled else "Oculto"
+
+                    precio_sede_str = stock.get("selling_price")
+                    precio_sede = (
+                        float(precio_sede_str) if precio_sede_str else precio_base
+                    )
+                else:
+                    estado_sede = "Inactivo"
+                    precio_sede = precio_base
+
+                row.extend([precio_sede, estado_sede])
+
+            ws.append(row)
+
+        # ========================================================
+        # 🎨 DISEÑO, BORDES Y AUTO-AJUSTE
+        # ========================================================
+        header_fill = PatternFill(
+            start_color="1E293B", end_color="1E293B", fill_type="solid"
+        )
+        header_font = Font(color="FFFFFF", bold=True)
+        thin_border = Border(
+            left=Side(style="thin", color="CBD5E1"),
+            right=Side(style="thin", color="CBD5E1"),
+            top=Side(style="thin", color="CBD5E1"),
+            bottom=Side(style="thin", color="CBD5E1"),
+        )
+
+        # Pintamos la cabecera
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+
+        # Fijamos los anchos
+        ws.column_dimensions["A"].width = 15  # SKU
+        ws.column_dimensions["B"].width = 45  # Nombre
+        ws.column_dimensions["C"].width = 20  # Categoría
+        ws.column_dimensions["D"].width = 15  # Tipo
+        ws.column_dimensions["E"].width = 12  # UOM
+        ws.column_dimensions["F"].width = 18  # Precio Base
+
+        if branch_id:
+            ws.column_dimensions["G"].width = 18  # Precio Sede
+            ws.column_dimensions["H"].width = 15  # Estado
+
+        # Formato de moneda para columnas de precio (Columna F, y G si hay sede)
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            row[5].number_format = '"S/" #,##0.00'  # Columna F (Índice 5)
+            if branch_id:
+                row[6].number_format = '"S/" #,##0.00'  # Columna G (Índice 6)
+
+        # Retornamos el Excel construido
+        response = HttpResponse(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = (
+            'attachment; filename="Catalogo_Productos.xlsx"'
+        )
+        wb.save(response)
+
+        return response
+
 
 class ProductRecipeViewSet(viewsets.ModelViewSet):
     queryset = ProductRecipe.objects.all()
     serializer_class = ProductRecipeSerializer
     permission_classes = [IsAuthenticated]
 
-    # Filtro para ver la receta de un producto específico
     def get_queryset(self):
         qs = super().get_queryset()
         finished_product_id = self.request.query_params.get("finished_product")
@@ -105,18 +321,49 @@ class StockViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             product__is_active=True, is_active=True
         ).select_related("product", "branch")
         branch_id = self.request.query_params.get("branch_id")
+        queryset = Stock.objects.filter(product__is_active=True).order_by("id")
+        queryset = queryset.select_related("product", "product__category", "branch")
+
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
         return queryset
 
+    def create(self, request, *args, **kwargs):
+        product_id = request.data.get("product")
+        branch_id = request.data.get("branch")
 
+        if not product_id or not branch_id:
+            return Response(
+                {"error": "Los campos 'product' y 'branch' son obligatorios."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        initial_qty = request.data.get("quantity", 0)
+
+        stock_obj, created = Stock.objects.get_or_create(
+            product_id=product_id,
+            branch_id=branch_id,
+            defaults={"quantity": initial_qty},
+        )
+
+        if not stock_obj.product.is_active:
+            stock_obj.product.is_active = True
+            stock_obj.product.save()
+
+        serializer = self.get_serializer(stock_obj)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+# --- 4. KARDEX (HISTORIAL) ---
 # --- 4. KARDEX (HISTORIAL) ---
 class KardexViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = KardexSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ["get", "head", "options"]
-
-    pagination_class = DynamicPagination
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         queryset = (
@@ -133,7 +380,13 @@ class KardexViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         if product_id:
             queryset = queryset.filter(product_id=product_id)
 
-        # 👇 NUEVO: FILTROS DE RANGO DE FECHAS 👇
+        # 👇 AQUÍ ESTÁ LA MAGIA QUE FALTABA: EL FILTRO POR TIPO 👇
+        movement_type = self.request.query_params.get("type")
+        if movement_type:
+            # Separamos por comas en caso de que vengan varios (Ej: "OUT_MERMA,OUT_COURTESY")
+            types_list = movement_type.split(",")
+            queryset = queryset.filter(type__in=types_list)
+
         start_date = self.request.query_params.get("start_date")
         end_date = self.request.query_params.get("end_date")
 
@@ -150,30 +403,72 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     queryset = InventoryAdjustment.objects.all().order_by("-created_at")
     serializer_class = InventoryAdjustmentSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
-    @transaction.atomic
-    def create(self, request, *args, **kwargs):
-        branch_id = request.data.get("branch_id")
-        adj_type = request.data.get("type")
-        reason = request.data.get("reason", "Ajuste manual")
-        details = request.data.get(
-            "details", []
-        )  # Lista de {product_id, quantity, unit_cost}
+    def get_queryset(self):
+        queryset = (
+            Kardex.objects.all()
+            .order_by("-date")
+            .select_related("product", "branch", "user")
+        )
 
-        if not details:
+        branch_id = self.request.query_params.get("branch_id")
+        product_id = self.request.query_params.get("product")
+        movement_type = self.request.query_params.get("type")
+
+        if branch_id:
+            queryset = queryset.filter(branch_id=branch_id)
+        if product_id:
+            queryset = queryset.filter(product_id=product_id)
+
+        if movement_type:
+            # 👇 AHORA ACEPTA VARIOS TIPOS SEPARADOS POR COMA 👇
+            types_list = movement_type.split(",")
+            queryset = queryset.filter(type__in=types_list)
+
+        start_date = self.request.query_params.get("start_date")
+        end_date = self.request.query_params.get("end_date")
+        if start_date:
+            queryset = queryset.filter(date__date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(date__date__lte=end_date)
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        try:
+            return super().list(request, *args, **kwargs)
+        except Exception as e:
+            import traceback
+
+            print("ERROR EN LISTA DE AJUSTES:")
+            print(traceback.format_exc())
             return Response(
-                {"error": "Debe incluir al menos un producto"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": f"Error al cargar historial de ajustes: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    def create(self, request, *args, **kwargs):
+        try:
+            with transaction.atomic():
+                branch_id = request.data.get("branch_id")
+                adj_type = request.data.get("type")
+                reason = request.data.get("reason", "Ajuste manual")
+                details = request.data.get("details", [])
+
+                if not details:
+                    return Response(
+                        {"error": "Debe incluir al menos un producto"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         # 1. Crear la cabecera del Ajuste
         adjustment = InventoryAdjustment.objects.create(
             branch_id=branch_id, type=adj_type, reason=reason, created_by=request.user
         )
 
-        # Mapeo de reglas según el tipo de ajuste
-        # Si es positivo (Entrada), suma. Si es negativo (Salida), resta.
-        is_entry = adj_type in ["MERMA_RETURN", "ADJUST_IN", "INITIAL"]
+        # Mapeo de reglas: Si es Producción, también es una "Entrada" del producto terminado
+        is_entry = adj_type in ["MERMA_RETURN", "ADJUST_IN", "INITIAL", "PRODUCTION"]
 
         kardex_type_map = {
             "MERMA_OUT": "OUT_MERMA",
@@ -182,21 +477,22 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             "ADJUST_IN": "IN_ADJUSTMENT",
             "ADJUST_OUT": "OUT_ADJUSTMENT",
             "INITIAL": "IN_ADJUSTMENT",
+            "PRODUCTION": "IN_PRODUCTION",  # 👈 El nuevo
         }
         k_type = kardex_type_map.get(adj_type, "OUT_ADJUSTMENT")
 
         for item in details:
             product = get_object_or_404(Product, id=item.get("product_id"))
 
-            # Si el producto no maneja stock (ej. servicios), lo ignoramos
             if not product.manage_stock:
                 continue
 
-            qty = Decimal(str(item.get("quantity", 0)))
-            if qty <= 0:
-                raise ValueError(f"La cantidad de {product.name} debe ser mayor a 0")
+                    qty = Decimal(str(item.get("quantity", 0)))
+                    if qty <= Decimal("0"):
+                        raise ValueError(
+                            f"La cantidad de '{product.name}' debe ser mayor a 0."
+                        )
 
-            # Obtenemos o creamos el stock para bloquearlo temporalmente mientras operamos
             stock, created = Stock.objects.select_for_update().get_or_create(
                 branch_id=branch_id,
                 product=product,
@@ -209,29 +505,23 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     raise ValueError(
                         f"Stock insuficiente para {product.name}. Actual: {stock.quantity}"
                     )
-
-                # En salidas, usamos el costo promedio actual del almacén
                 costo_unitario = stock.average_cost
                 qty_kardex = -qty
                 stock.quantity -= qty
             else:
-                # En entradas, usamos el costo que nos envían o el actual si mandan 0
                 costo_unitario = Decimal(str(item.get("unit_cost", stock.average_cost)))
 
-                # Recalculamos el Costo Promedio Ponderado (CPP) si es una entrada
                 total_value_old = stock.quantity * stock.average_cost
                 total_value_new = qty * costo_unitario
                 new_qty = stock.quantity + qty
                 stock.average_cost = (
                     (total_value_old + total_value_new) / new_qty if new_qty > 0 else 0
                 )
-
                 qty_kardex = qty
                 stock.quantity = new_qty
 
             stock.save()
 
-            # Guardar el detalle del ajuste
             InventoryAdjustmentDetail.objects.create(
                 adjustment=adjustment,
                 product=product,
@@ -239,7 +529,6 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 unit_cost=costo_unitario,
             )
 
-            # Registrar en KARDEX
             Kardex.objects.create(
                 branch_id=branch_id,
                 product=product,
@@ -255,8 +544,70 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 description=reason,
             )
 
+                    if adj_type == "PRODUCTION" and product.has_recipe:
+                        ingredients = ProductRecipe.objects.filter(
+                            finished_product=product
+                        )
+
+                if not ingredients.exists():
+                    raise ValueError(
+                        f"El producto {product.name} no tiene una receta configurada para producirse."
+                    )
+
+                for recipe_item in ingredients:
+                    insumo = recipe_item.ingredient
+
+                    # ¿Cuánto insumo se necesita? (Cant producida * cantidad en receta)
+                    # Ej: Si haces 10 Kg masa, y la receta pide 0.6 Kg harina -> 10 * 0.6 = 6 Kg
+                    qty_to_deduct = qty * recipe_item.quantity
+
+                    # Buscamos el stock del insumo
+                    stock_insumo, _ = Stock.objects.select_for_update().get_or_create(
+                        branch_id=branch_id,
+                        product=insumo,
+                        defaults={"quantity": 0, "average_cost": 0},
+                    )
+
+                    # Opcional: Podrías bloquear si no hay insumos con el 'if stock_insumo.quantity < qty_to_deduct'
+                    # Pero en restaurantes es mejor permitir saldo negativo temporal para no frenar la cocina
+
+                    costo_insumo = stock_insumo.average_cost
+                    stock_insumo.quantity -= qty_to_deduct
+                    stock_insumo.save()
+
+                    # Guardamos el Kardex silencioso del insumo
+                    Kardex.objects.create(
+                        branch_id=branch_id,
+                        product=insumo,
+                        type="OUT_PRODUCTION",
+                        quantity=-qty_to_deduct,
+                        unit_cost=costo_insumo,
+                        total_cost=qty_to_deduct * costo_insumo,
+                        balance_quantity=stock_insumo.quantity,
+                        balance_unit_cost=stock_insumo.average_cost,
+                        balance_total_cost=stock_insumo.quantity
+                        * stock_insumo.average_cost,
+                        user=request.user,
+                        reference_document=f"PROD #{adjustment.id}",
+                        description=f"Consumo automático para fabricar {qty}x {product.name}",
+                    )
+            # 👆🔥 FIN DE LA MAGIA DE RECETAS 🔥👆
+
         serializer = self.get_serializer(adjustment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        except ValueError as ve:
+            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            import traceback
+
+            print("ERROR CRÍTICO AL CREAR AJUSTE:")
+            print(traceback.format_exc())
+            return Response(
+                {"error": f"Error interno en Ajustes: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 # --- 6. MOTOR DE TRASLADOS (ENTRE SEDES) ---
@@ -271,10 +622,6 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def receive(self, request, pk=None):
-        """
-        Punto final donde la sede de destino dice: "Ya me llegó la mercadería".
-        Aquí es donde restamos a origen y le sumamos a destino.
-        """
         transfer = self.get_object()
 
         if transfer.status != "PENDING":
@@ -282,17 +629,14 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 {"error": "Solo se pueden recibir traslados pendientes"}, status=400
             )
 
-        # Procesar cada producto del traslado
         for detail in transfer.details.all():
             if not detail.product.manage_stock:
                 continue
 
-            # 1. QUITAR DE ORIGEN
             stock_origin = Stock.objects.select_for_update().get(
                 branch=transfer.origin_branch, product=detail.product
             )
 
-            # 👇 CORRECCIÓN: Devolvemos un Response 400 en vez de un raise ValueError 👇
             if stock_origin.quantity < detail.quantity:
                 return Response(
                     {
@@ -301,11 +645,10 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                     status=400,
                 )
 
-            costo_traslado = stock_origin.average_cost  # Se va con el costo de origen
+            costo_traslado = stock_origin.average_cost
             stock_origin.quantity -= detail.quantity
             stock_origin.save()
 
-            # Kardex Origen
             Kardex.objects.create(
                 branch=transfer.origin_branch,
                 product=detail.product,
@@ -320,25 +663,21 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 reference_document=f"TRASLADO OUT #{transfer.id}",
             )
 
-            # 2. PONER EN DESTINO
             stock_dest, _ = Stock.objects.select_for_update().get_or_create(
                 branch=transfer.destination_branch,
                 product=detail.product,
                 defaults={"quantity": 0, "average_cost": costo_traslado},
             )
 
-            # Recalcular Promedio en Destino
             total_old = stock_dest.quantity * stock_dest.average_cost
             total_new = detail.quantity * costo_traslado
             stock_dest.quantity += detail.quantity
 
-            # Evitar división por cero por seguridad matemática
             if stock_dest.quantity > 0:
                 stock_dest.average_cost = (total_old + total_new) / stock_dest.quantity
 
             stock_dest.save()
 
-            # Kardex Destino
             Kardex.objects.create(
                 branch=transfer.destination_branch,
                 product=detail.product,
@@ -353,7 +692,6 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 reference_document=f"TRASLADO IN #{transfer.id}",
             )
 
-        # 3. Marcar como completado
         transfer.status = "COMPLETED"
         transfer.received_by = request.user
         transfer.save()
@@ -361,3 +699,280 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         return Response(
             {"message": "Traslado recibido exitosamente y stock actualizado"}
         )
+
+
+class PhysicalInventoryViewSet(viewsets.ModelViewSet):
+    queryset = PhysicalInventory.objects.all().order_by("-created_at")
+    serializer_class = PhysicalInventorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        branch_id = self.request.query_params.get("branch_id")
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        return qs
+
+    def perform_create(self, serializer):
+        start_date = serializer.validated_data.get("start_date")
+        end_date = serializer.validated_data.get("end_date")
+        branch = serializer.validated_data.get("branch")
+
+        inventory = serializer.save(created_by=self.request.user)
+
+        stocks_actuales = Stock.objects.filter(
+            branch=branch, product__manage_stock=True, is_active=True
+        ).select_related("product")
+
+        detalles_a_crear = []
+
+        if start_date and end_date:
+            end_datetime = datetime.datetime.combine(end_date, datetime.time.max)
+            if timezone.is_aware(timezone.now()):
+                end_datetime = timezone.make_aware(end_datetime)
+
+            for stock in stocks_actuales:
+                ultimo_kardex_anterior = (
+                    Kardex.objects.filter(
+                        branch=branch, product=stock.product, date__date__lt=start_date
+                    )
+                    .order_by("-date", "-id")
+                    .first()
+                )
+
+                stock_inicial = (
+                    ultimo_kardex_anterior.balance_quantity
+                    if ultimo_kardex_anterior
+                    else Decimal("0.0")
+                )
+
+                movimientos_periodo = Kardex.objects.filter(
+                    branch=branch,
+                    product=stock.product,
+                    date__date__gte=start_date,
+                    date__lte=end_datetime,
+                ).aggregate(
+                    total_entradas=Sum("quantity", filter=Q(quantity__gt=0)),
+                    total_salidas=Sum("quantity", filter=Q(quantity__lt=0)),
+                )
+
+                entradas = movimientos_periodo["total_entradas"] or Decimal("0.0")
+                salidas = abs(movimientos_periodo["total_salidas"] or Decimal("0.0"))
+
+                stock_teorico_final = stock_inicial + entradas - salidas
+
+                ultimo_kardex_periodo = (
+                    Kardex.objects.filter(
+                        branch=branch,
+                        product=stock.product,
+                        date__date__gte=start_date,
+                        date__lte=end_datetime,
+                    )
+                    .order_by("-date", "-id")
+                    .first()
+                )
+
+                costo_cierre = (
+                    ultimo_kardex_periodo.balance_unit_cost
+                    if ultimo_kardex_periodo
+                    else stock.average_cost
+                )
+
+                detalles_a_crear.append(
+                    PhysicalInventoryDetail(
+                        inventory=inventory,
+                        product=stock.product,
+                        initial_stock=stock_inicial,
+                        total_inputs=entradas,
+                        total_outputs=salidas,
+                        system_stock=stock_teorico_final,
+                        unit_cost=costo_cierre,
+                        physical_stock=stock_teorico_final,
+                    )
+                )
+        else:
+            for stock in stocks_actuales:
+                detalles_a_crear.append(
+                    PhysicalInventoryDetail(
+                        inventory=inventory,
+                        product=stock.product,
+                        initial_stock=stock.quantity,
+                        total_inputs=0,
+                        total_outputs=0,
+                        system_stock=stock.quantity,
+                        unit_cost=stock.average_cost,
+                        physical_stock=stock.quantity,
+                    )
+                )
+
+        PhysicalInventoryDetail.objects.bulk_create(detalles_a_crear)
+
+    @action(detail=True, methods=["post"])
+    def save_draft(self, request, pk=None):
+        try:
+            inventory = self.get_object()
+            if inventory.status == "CLOSED":
+                return Response(
+                    {"error": "No se puede editar un inventario cerrado."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            detalles_modificados = request.data.get("details", [])
+
+            for item in detalles_modificados:
+                try:
+                    detalle = PhysicalInventoryDetail.objects.get(
+                        id=item.get("id"), inventory=inventory
+                    )
+
+                    val_fisico = item.get("physical_stock")
+                    if val_fisico in [None, ""]:
+                        val_fisico = detalle.system_stock
+
+                    detalle.physical_stock = val_fisico
+
+                    action_taken = item.get("action_taken")
+                    if action_taken:
+                        detalle.action_taken = action_taken
+
+                    action_notes = item.get("action_notes")
+                    if action_notes is not None:
+                        detalle.action_notes = action_notes
+
+                    detalle.save()
+                except PhysicalInventoryDetail.DoesNotExist:
+                    continue
+
+            return Response({"message": "Borrador guardado correctamente."})
+
+        except Exception as e:
+            return Response(
+                {"error": f"Error guardando borrador: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"])
+    def close_inventory(self, request, pk=None):
+        try:
+            inventory = self.get_object()
+
+            if inventory.status == "CLOSED":
+                return Response(
+                    {"error": "El inventario ya fue auditado y cerrado."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            draft_response = self.save_draft(request)
+            if draft_response.status_code != 200:
+                return draft_response
+
+            with transaction.atomic():
+                detalles = inventory.details.all()
+                ref_str = getattr(inventory, "reference", f"ID-{inventory.id}")
+
+                for detalle in detalles:
+                    diff = (
+                        Decimal(str(detalle.difference))
+                        if detalle.difference
+                        else Decimal("0")
+                    )
+                    unit_cost = (
+                        Decimal(str(detalle.unit_cost))
+                        if detalle.unit_cost
+                        else Decimal("0")
+                    )
+
+                    if diff != Decimal("0") and detalle.action_taken == "ADJUST":
+                        adj_type = "ADJUST_IN" if diff > 0 else "ADJUST_OUT"
+                        cantidad_absoluta = abs(diff)
+
+                        stock, _ = Stock.objects.select_for_update().get_or_create(
+                            branch=inventory.branch,
+                            product=detalle.product,
+                            defaults={
+                                "quantity": Decimal("0"),
+                                "average_cost": unit_cost,
+                            },
+                        )
+
+                        stock_qty = (
+                            Decimal(str(stock.quantity))
+                            if stock.quantity
+                            else Decimal("0")
+                        )
+                        nueva_cantidad = stock_qty + diff
+
+                        if nueva_cantidad < Decimal("0"):
+                            raise ValueError(
+                                f"No se puede ajustar '{detalle.product.name}'. "
+                                f"Intentas restar {cantidad_absoluta}, pero el stock actual es solo {stock_qty}."
+                            )
+
+                        ajuste = InventoryAdjustment.objects.create(
+                            branch=inventory.branch,
+                            type=adj_type,
+                            reason=f"Cuadre de Inv. {ref_str} - Ajuste de Sistema",
+                            created_by=request.user,
+                        )
+
+                        InventoryAdjustmentDetail.objects.create(
+                            adjustment=ajuste,
+                            product=detalle.product,
+                            quantity=cantidad_absoluta,
+                            unit_cost=unit_cost,
+                        )
+
+                        stock.quantity = nueva_cantidad
+                        stock.save()
+
+                        tipo_kardex = "IN_ADJUSTMENT" if diff > 0 else "OUT_ADJUSTMENT"
+
+                        avg_cost = (
+                            Decimal(str(stock.average_cost))
+                            if stock.average_cost
+                            else Decimal("0")
+                        )
+                        final_qty = (
+                            Decimal(str(stock.quantity))
+                            if stock.quantity
+                            else Decimal("0")
+                        )
+
+                        Kardex.objects.create(
+                            branch=inventory.branch,
+                            product=detalle.product,
+                            date=timezone.now(),
+                            type=tipo_kardex,
+                            quantity=cantidad_absoluta
+                            if diff > 0
+                            else -cantidad_absoluta,
+                            unit_cost=unit_cost,
+                            total_cost=cantidad_absoluta * unit_cost,
+                            balance_quantity=final_qty,
+                            balance_unit_cost=avg_cost,
+                            balance_total_cost=final_qty * avg_cost,
+                            user=request.user,
+                            description=f"Ajuste por Cuadre de Inventario {ref_str}",
+                        )
+
+            inventory.status = "CLOSED"
+            inventory.closed_at = timezone.now()
+            inventory.save()
+
+            return Response(
+                {
+                    "message": "Inventario cerrado. Se aplicaron solo los ajustes seleccionados."
+                }
+            )
+
+        except ValueError as ve:
+            return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            import traceback
+
+            print(traceback.format_exc())
+            return Response(
+                {"error": f"Error Crítico en el Servidor (Python): {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

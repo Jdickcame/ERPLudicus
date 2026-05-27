@@ -4,22 +4,17 @@ import {
   ChevronLeft,
   ChevronRight,
   Edit,
-  FileText,
   Loader2,
   Plus,
   Save,
   Search,
   Trash2,
-  Wallet,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import api from "../../api/axios";
-import BranchSelector from "../../components/common/BranchSelector";
-import { useBranch } from "../../context/BranchContext";
 
-// Hook simple para "Debounce" (espera a que el usuario deje de escribir para buscar)
+// Hook simple para "Debounce"
 function useDebounce(value: string, delay: number) {
   const [debouncedValue, setDebouncedValue] = useState(value);
   useEffect(() => {
@@ -30,9 +25,6 @@ function useDebounce(value: string, delay: number) {
 }
 
 const Suppliers = () => {
-  const { currentBranch } = useBranch();
-  const navigate = useNavigate();
-
   // --- ESTADOS DE DATOS ---
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,11 +38,10 @@ const Suppliers = () => {
   const pageSize = 20;
   const [ordering, setOrdering] = useState("-id");
 
-  // Estados Modales
+  // Estados Modal Proveedor
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
-  // Estado Formulario Proveedor
   const [formData, setFormData] = useState({
     id: null,
     name: "",
@@ -60,66 +51,43 @@ const Suppliers = () => {
     address: "",
   });
 
-  // Estados Modal Saldo
-  const [isBalanceModalOpen, setIsBalanceModalOpen] = useState(false);
-  const [selectedSupplier, setSelectedSupplier] = useState<any>(null);
-  const [balanceAmount, setBalanceAmount] = useState("");
-  const [transactionNumber, setTransactionNumber] = useState("");
-
-  // --- FUNCIÓN DE CARGA DINÁMICA ---
   const loadSuppliers = useCallback(async () => {
-    // Si no hay branch, no cargamos nada para evitar errores
-    // (A menos que los proveedores sean globales, en cuyo caso quita esto)
-    if (!currentBranch) return;
-
     setLoading(true);
-
     try {
       const params: any = {
-        // branch_id: currentBranch.id, // OJO: Si los proveedores son globales para toda la empresa, puedes quitar esto.
         page: page,
-        page_size: pageSize, // Enviamos el límite
+        page_size: pageSize,
         ordering: ordering,
       };
 
-      if (debouncedSearch) {
-        params.search = debouncedSearch; // Esto activa el filters.SearchFilter de Django
-      }
+      if (debouncedSearch) params.search = debouncedSearch;
 
       const response = await api.get("/purchases/suppliers/", { params });
 
-      // Verificamos si Django devolvió un objeto paginado (con results) o la lista plana
       if (response.data && response.data.results) {
         setSuppliers(response.data.results);
         setTotalCount(response.data.count);
       } else {
-        // Si Django devuelve la lista plana ignorando la paginación, la forzamos visualmente aquí
         const allData = Array.isArray(response.data) ? response.data : [];
         setTotalCount(allData.length);
-
-        // Paginación manual en el frontend
         const startIndex = (page - 1) * pageSize;
-        const endIndex = startIndex + pageSize;
-        setSuppliers(allData.slice(startIndex, endIndex));
+        setSuppliers(allData.slice(startIndex, startIndex + pageSize));
       }
     } catch (error) {
       console.error("Error cargando proveedores:", error);
     } finally {
       setLoading(false);
     }
-  }, [currentBranch, page, debouncedSearch, ordering]);
+  }, [page, debouncedSearch, ordering]);
 
-  // Ejecutar carga principal
   useEffect(() => {
     loadSuppliers();
   }, [loadSuppliers]);
 
-  // Resetear página a 1 si el usuario busca algo nuevo
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, currentBranch]);
+  }, [debouncedSearch]);
 
-  // --- MANEJADORES DE ORDENAMIENTO ---
   const handleSort = (field: string) => {
     if (ordering === field) setOrdering(`-${field}`);
     else if (ordering === `-${field}`) setOrdering(field);
@@ -133,7 +101,6 @@ const Suppliers = () => {
     return null;
   };
 
-  // --- LÓGICA ABM ---
   const openModal = (supplier: any = null) => {
     if (supplier) {
       setIsEditing(true);
@@ -176,88 +143,56 @@ const Suppliers = () => {
       loadSuppliers();
     } catch (error) {
       console.error(error);
-      alert("No se puede eliminar (tiene historial)");
-    }
-  };
-
-  // --- LÓGICA SALDOS ---
-  const openBalanceModal = (supplier: any) => {
-    setSelectedSupplier(supplier);
-    setBalanceAmount("");
-    setTransactionNumber("");
-    setIsBalanceModalOpen(true);
-  };
-
-  const handleAddBalance = async () => {
-    if (!balanceAmount || !transactionNumber)
-      return alert("Debes ingresar monto y N° de operación");
-    if (!currentBranch) return;
-
-    try {
-      await api.post(
-        `/purchases/suppliers/${selectedSupplier.id}/add_balance/`,
-        {
-          amount: balanceAmount,
-          transaction_number: transactionNumber,
-          branch_id: currentBranch.id,
-        },
-      );
-      alert("Saldo actualizado correctamente");
-      setIsBalanceModalOpen(false);
-      loadSuppliers();
-    } catch (error) {
-      console.error(error);
-      alert("Error al actualizar saldo");
+      alert("No se puede eliminar (tiene historial de compras)");
     }
   };
 
   const totalPages = Math.ceil(totalCount / pageSize);
 
   return (
-    <div className="p-6 animate-in fade-in duration-500">
+    <div className="p-6 animate-in fade-in duration-500 max-w-6xl mx-auto">
       {/* CABECERA */}
       <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-slate-800">Proveedores</h1>
-            <BranchSelector />
-          </div>
+          <h1 className="text-2xl font-bold text-slate-800">
+            Directorio de Proveedores
+          </h1>
           <p className="text-slate-500 text-sm mt-1">
-            Gestión de contactos y saldos ({totalCount} registros)
+            Gestión de contactos ({totalCount} registros)
           </p>
         </div>
         <button
           onClick={() => openModal()}
-          className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-700 transition shadow-sm font-medium"
+          className="bg-blue-600 text-white px-4 py-2.5 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition shadow-sm font-bold"
         >
-          <Plus size={18} /> Nuevo Proveedor
+          <Plus size={18} /> Nuevo Contacto
         </button>
       </div>
 
-      {/* BARRA DE BÚSQUEDA */}
-      <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 mb-6 relative">
+      {/* BÚSQUEDA */}
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 relative">
         <Search className="absolute left-6 top-6 text-slate-400" size={20} />
         <input
           type="text"
           placeholder="Buscar por nombre o RUC..."
-          className="w-full pl-10 pr-4 py-2 border rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100 transition-all"
+          className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-100 transition-all"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
         />
       </div>
 
-      {/* TABLA PRINCIPAL */}
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-x-auto mb-4">
+      {/* TABLA PURA */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">
         {loading ? (
           <div className="py-20 flex justify-center items-center gap-3 text-slate-500">
-            <Loader2 className="animate-spin" /> Cargando datos...
+            <Loader2 className="animate-spin text-blue-500" size={32} />
           </div>
         ) : (
           <table className="w-full text-sm text-left">
-            <thead className="bg-slate-50 uppercase text-[10px] tracking-wider text-slate-600 font-bold border-b select-none">
+            <thead className="bg-slate-50 uppercase text-[10px] tracking-wider text-slate-500 font-bold border-b">
               <tr>
                 <th
-                  className="p-4 cursor-pointer hover:bg-slate-100"
+                  className="p-4 cursor-pointer hover:bg-slate-100 transition"
                   onClick={() => handleSort("name")}
                 >
                   <div className="flex items-center">
@@ -265,111 +200,55 @@ const Suppliers = () => {
                   </div>
                 </th>
                 <th
-                  className="p-4 cursor-pointer hover:bg-slate-100"
+                  className="p-4 cursor-pointer hover:bg-slate-100 transition"
                   onClick={() => handleSort("tax_id")}
                 >
                   <div className="flex items-center">
                     RUC / ID {getSortIcon("tax_id")}
                   </div>
                 </th>
-                <th className="p-4">Contacto</th>
-                <th
-                  className="p-4 text-right cursor-pointer hover:bg-slate-100"
-                  onClick={() => handleSort("balance")}
-                >
-                  <div className="flex justify-end items-center">
-                    Saldo Actual {getSortIcon("balance")}
-                  </div>
-                </th>
+                <th className="p-4">Información de Contacto</th>
                 <th className="p-4 text-center">Acciones</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 text-xs">
+            <tbody className="divide-y divide-slate-100 text-sm">
               {suppliers.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="text-center py-10 text-slate-400 text-sm"
-                  >
-                    No se encontraron proveedores.
+                  <td colSpan={4} className="text-center py-10 text-slate-400">
+                    No se encontraron contactos.
                   </td>
                 </tr>
               ) : (
-                suppliers.map((s) => {
-                  const balance = parseFloat(s.balance || "0");
-                  return (
-                    <tr
-                      key={s.id}
-                      className="hover:bg-slate-50 group transition"
-                    >
-                      <td className="p-4 font-medium text-slate-800">
-                        {s.name}
-                      </td>
-                      <td className="p-4 text-slate-600 font-mono">
-                        {s.tax_id}
-                      </td>
-                      <td className="p-4 text-slate-500">
-                        <div className="font-medium text-slate-700">
-                          {s.phone || "-"}
-                        </div>
-                        <div className="text-[11px]">{s.email}</div>
-                      </td>
-                      <td className="p-4 text-right">
-                        {balance > 0 ? (
-                          <span
-                            className="text-red-700 font-bold bg-red-50 border border-red-200 px-2.5 py-1 rounded-md text-[11px]"
-                            title="Deuda por pagar"
-                          >
-                            S/ {balance.toFixed(2)}
-                          </span>
-                        ) : balance < 0 ? (
-                          <span
-                            className="text-green-700 font-bold bg-green-50 border border-green-200 px-2.5 py-1 rounded-md text-[11px]"
-                            title="Saldo a tu favor"
-                          >
-                            + S/ {Math.abs(balance).toFixed(2)}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 font-medium bg-slate-50 px-2.5 py-1 rounded-md text-[11px]">
-                            S/ 0.00
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-4 flex justify-center gap-1.5">
-                        <button
-                          onClick={() =>
-                            navigate(`/purchases/suppliers/${s.id}/statement`)
-                          }
-                          className="bg-slate-100 text-slate-600 p-1.5 rounded-full hover:bg-slate-200 transition-colors"
-                          title="Ver Estado de Cuenta"
-                        >
-                          <FileText size={16} />
-                        </button>
-                        <button
-                          onClick={() => openBalanceModal(s)}
-                          className="bg-green-50 text-green-600 p-1.5 rounded-full hover:bg-green-100 transition-colors"
-                          title="Cargar Saldo"
-                        >
-                          <Wallet size={16} />
-                        </button>
-                        <button
-                          onClick={() => openModal(s)}
-                          className="bg-blue-50 text-blue-600 p-1.5 rounded-full hover:bg-blue-100 transition-colors"
-                          title="Editar Proveedor"
-                        >
-                          <Edit size={16} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(s.id)}
-                          className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1.5 rounded-full transition-colors opacity-0 group-hover:opacity-100"
-                          title="Eliminar Proveedor"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })
+                suppliers.map((s) => (
+                  <tr key={s.id} className="hover:bg-slate-50 group transition">
+                    <td className="p-4 font-bold text-slate-700">{s.name}</td>
+                    <td className="p-4 text-slate-500 font-mono">{s.tax_id}</td>
+                    <td className="p-4">
+                      <div className="font-medium text-slate-700">
+                        {s.phone || "-"}
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        {s.email || "Sin email"}
+                      </div>
+                    </td>
+                    <td className="p-4 flex justify-center gap-2">
+                      <button
+                        onClick={() => openModal(s)}
+                        className="text-slate-400 hover:text-blue-600 bg-slate-100 hover:bg-blue-50 p-2 rounded-lg transition-colors"
+                        title="Editar Proveedor"
+                      >
+                        <Edit size={16} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(s.id)}
+                        className="text-slate-400 hover:text-red-600 bg-slate-100 hover:bg-red-50 p-2 rounded-lg transition-colors"
+                        title="Eliminar Proveedor"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
@@ -377,7 +256,7 @@ const Suppliers = () => {
       </div>
 
       {/* PAGINACIÓN */}
-      <div className="flex justify-between items-center bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+      <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
         <div className="text-sm text-slate-500">
           Página <b>{page}</b> de <b>{totalPages || 1}</b>
         </div>
@@ -385,43 +264,43 @@ const Suppliers = () => {
           <button
             onClick={() => setPage((p) => Math.max(p - 1, 1))}
             disabled={page === 1 || loading}
-            className="p-2 border rounded hover:bg-slate-50 disabled:opacity-50 transition"
+            className="p-2 border rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
           >
-            <ChevronLeft size={16} />
+            <ChevronLeft size={18} />
           </button>
           <button
             onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
             disabled={page === totalPages || totalPages === 0 || loading}
-            className="p-2 border rounded hover:bg-slate-50 disabled:opacity-50 transition"
+            className="p-2 border rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
           >
-            <ChevronRight size={16} />
+            <ChevronRight size={18} />
           </button>
         </div>
       </div>
 
-      {/* MODAL PROVEEDOR */}
+      {/* MODAL EDICIÓN PROVEEDOR */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg">
+        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-lg">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-slate-800">
-                {isEditing ? "Editar" : "Nuevo"} Proveedor
+              <h2 className="text-xl font-black text-slate-800">
+                {isEditing ? "Editar Contacto" : "Nuevo Contacto"}
               </h2>
               <button
                 onClick={() => setIsModalOpen(false)}
-                className="hover:bg-slate-100 p-1 rounded-full transition"
+                className="hover:bg-slate-100 p-2 rounded-full transition"
               >
-                <X size={24} className="text-slate-500" />
+                <X size={20} className="text-slate-500" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
+                <label className="text-xs font-bold text-slate-500 uppercase">
                   Razón Social <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  className="w-full border p-2.5 rounded-lg outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
+                  className="w-full border p-3 rounded-xl mt-1 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                   value={formData.name}
                   onChange={(e) =>
                     setFormData({ ...formData, name: e.target.value })
@@ -429,12 +308,12 @@ const Suppliers = () => {
                 />
               </div>
               <div>
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
+                <label className="text-xs font-bold text-slate-500 uppercase">
                   RUC / DNI <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  className="w-full border p-2.5 rounded-lg outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
+                  className="w-full border p-3 rounded-xl mt-1 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                   value={formData.tax_id}
                   onChange={(e) =>
                     setFormData({ ...formData, tax_id: e.target.value })
@@ -443,12 +322,12 @@ const Suppliers = () => {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
+                  <label className="text-xs font-bold text-slate-500 uppercase">
                     Teléfono
                   </label>
                   <input
                     type="text"
-                    className="w-full border p-2.5 rounded-lg outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
+                    className="w-full border p-3 rounded-xl mt-1 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                     value={formData.phone}
                     onChange={(e) =>
                       setFormData({ ...formData, phone: e.target.value })
@@ -456,12 +335,12 @@ const Suppliers = () => {
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
+                  <label className="text-xs font-bold text-slate-500 uppercase">
                     Email
                   </label>
                   <input
                     type="email"
-                    className="w-full border p-2.5 rounded-lg outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
+                    className="w-full border p-3 rounded-xl mt-1 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                     value={formData.email}
                     onChange={(e) =>
                       setFormData({ ...formData, email: e.target.value })
@@ -470,11 +349,11 @@ const Suppliers = () => {
                 </div>
               </div>
               <div>
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">
+                <label className="text-xs font-bold text-slate-500 uppercase">
                   Dirección
                 </label>
                 <textarea
-                  className="w-full border p-2.5 rounded-lg outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400 h-24 resize-none"
+                  className="w-full border p-3 rounded-xl mt-1 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 h-20 resize-none"
                   value={formData.address}
                   onChange={(e) =>
                     setFormData({ ...formData, address: e.target.value })
@@ -483,69 +362,9 @@ const Suppliers = () => {
               </div>
               <button
                 onClick={handleSaveSupplier}
-                className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 gap-2 flex justify-center items-center shadow-md transition-colors mt-2"
+                className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold hover:bg-blue-700 gap-2 flex justify-center items-center shadow-lg shadow-blue-200 transition-all mt-4"
               >
-                <Save size={18} /> Guardar Proveedor
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL SALDO */}
-      {isBalanceModalOpen && selectedSupplier && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white p-6 rounded-2xl shadow-xl w-96">
-            <div className="flex justify-between items-start mb-6">
-              <div>
-                <h2 className="text-lg font-bold flex items-center gap-2 text-green-700">
-                  <Wallet /> Cargar Saldo a Favor
-                </h2>
-                <p className="text-xs text-slate-500 font-medium mt-1">
-                  {selectedSupplier.name}
-                </p>
-              </div>
-              <button
-                onClick={() => setIsBalanceModalOpen(false)}
-                className="hover:bg-slate-100 p-1 rounded-full transition"
-              >
-                <X size={20} className="text-slate-400" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-bold uppercase mb-1 text-slate-500 block">
-                  Monto a Cargar (S/)
-                </label>
-                <input
-                  type="number"
-                  className="w-full border-2 border-green-500 p-3 rounded-xl text-2xl font-bold text-center text-green-700 outline-none focus:ring-4 focus:ring-green-100"
-                  placeholder="0.00"
-                  autoFocus
-                  value={balanceAmount}
-                  onChange={(e) => setBalanceAmount(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold uppercase mb-1 text-slate-500 block">
-                  N° Operación / Referencia
-                </label>
-                <input
-                  type="text"
-                  className="w-full border p-3 rounded-lg text-sm font-medium outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-400"
-                  placeholder="Ej: OP-123456"
-                  value={transactionNumber}
-                  onChange={(e) => setTransactionNumber(e.target.value)}
-                />
-              </div>
-
-              <button
-                onClick={handleAddBalance}
-                className="w-full bg-green-600 text-white p-3.5 rounded-xl hover:bg-green-700 font-bold shadow-md transition-colors flex justify-center mt-2"
-              >
-                CONFIRMAR CARGA
+                <Save size={18} /> Guardar Registro
               </button>
             </div>
           </div>

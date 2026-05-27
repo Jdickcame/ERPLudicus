@@ -35,15 +35,51 @@ DEBUG = env.bool("DEBUG", default=False)
 
 APPEND_SLASH = True
 
-# # Produccion
-# ALLOWED_HOSTS = [
-#     "api.ludicuspark.com",
-#     "app-erp.ludicuspark.com",
-#     "www.app-erp.ludicuspark.com",
-# ]
+# ==============================================================================
+# CONFIGURACIÓN DINÁMICA DE HOSTS Y CORS (Basado en DEBUG)
+# ==============================================================================
 
+if DEBUG:
+    # MODO DESARROLLO (Local)
+    ALLOWED_HOSTS = [
+        "localhost",
+        "127.0.0.1",
+        "testserver",
+        "192.168.18.141",
+        "10.253.21.215",
+    ]
 
-ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",  # React/Vite
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost",
+        "capacitor://localhost",
+    ]
+else:
+    # MODO PRODUCCIÓN (Servidor en la Nube)
+    ALLOWED_HOSTS = env.list(
+        "ALLOWED_HOSTS",
+        default=[
+            "api.ludicuspark.com",
+            "app-erp.ludicuspark.com",
+            "www.app-erp.ludicuspark.com",
+        ],
+    )
+
+    CORS_ALLOWED_ORIGINS = env.list(
+        "CORS_ALLOWED_ORIGINS",
+        default=[
+            "https://app-erp.ludicuspark.com",
+            "https://www.app-erp.ludicuspark.com",
+            # ORÍGENES PARA EL APK DE CAPACITOR
+            "http://localhost",
+            "capacitor://localhost",
+            "http://localhost:5173",
+        ],
+    )
+
+# ==============================================================================
 
 
 # Application definition
@@ -55,12 +91,14 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    # adicionales agregados manualmente
     "rest_framework",
     "django_filters",
     "rest_framework_simplejwt",
     "corsheaders",
     "users",
+    "company",
+    "branches",
+    "cash",
     "inventory",
     "sales",
     "purchases",
@@ -108,10 +146,10 @@ WSGI_APPLICATION = "core.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-# Se modifica para MySQL
+# Se modifica para MySQL con Connection Pool
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.mysql",
+        "ENGINE": "dj_db_conn_pool.backends.mysql",
         "NAME": env("DB_NAME"),
         "USER": env("DB_USER"),
         "PASSWORD": env("DB_PASSWORD"),
@@ -120,17 +158,25 @@ DATABASES = {
         "OPTIONS": {
             "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
         },
+        "POOL_OPTIONS": {
+            "POOL_SIZE": 10,
+            "MAX_OVERFLOW": 10,
+            "RECYCLE": 30,  # Banahosting mata conexiones rápido, las reciclamos cada 30 seg
+            "PRE_PING": True,  # Verifica si la conexión está viva antes de usarla
+        },
     }
 }
 
-APISPERU_URL = os.getenv("APISPERU_URL")
-APISPERU_TOKEN = os.getenv("APISPERU_TOKEN")
-APISPERU_CONSULTA_TOKEN = os.getenv("APISPERU_CONSULTA_TOKEN")
+APISPERU_URL = env("APISPERU_URL", default="")
+APISPERU_TOKEN = env("APISPERU_TOKEN", default="")
+APISPERU_CONSULTA_TOKEN = env("APISPERU_CONSULTA_TOKEN", default="")
+FACTILIZA_TOKEN = env("FACTILIZA_TOKEN", default="")
 
 # DRF CONFIG
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "core.pagination.StandardResultsSetPagination",
     )
 }
 
@@ -194,6 +240,11 @@ STATIC_URL = "static/"
 # PRODUCCION
 # STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 # STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+
+# Media files (Archivos físicos generados por el sistema: XML, ZIP, PDFs)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

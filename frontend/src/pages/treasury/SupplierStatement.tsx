@@ -1,11 +1,14 @@
 import {
+  AlertCircle,
   ArrowLeft,
   Calendar,
   Download,
   Eye,
+  FileText,
   Filter,
   RefreshCw,
   Search,
+  Wallet,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -15,7 +18,13 @@ import PurchaseDetailModal from "../../components/purchases/PurchaseDetailModal"
 interface Transaction {
   id: number;
   date: string;
-  type: "COMPRA" | "PAGO" | "NOTA_CREDITO" | "SALDO_INICIAL";
+  type:
+    | "COMPRA"
+    | "PAGO"
+    | "NOTA_CREDITO"
+    | "SALDO_INICIAL"
+    | "ADELANTO"
+    | "NOTA_DEBITO";
   document: string;
   amount: number;
   status: string;
@@ -30,13 +39,14 @@ const SupplierStatement = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [supplier, setSupplier] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [isSyncing, setIsSyncing] = useState(false); // 👈 NUEVO: Estado de carga del botón
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  // 👇 NUEVO: Estado para almacenar la deuda operativa (Facturas sin pagar)
+  const [pendingDebt, setPendingDebt] = useState(0);
 
   // Filtros
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
-
-  // Filtro de Fechas
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
@@ -55,7 +65,11 @@ const SupplierStatement = () => {
       if (startDate) url += `&start_date=${startDate}`;
       if (endDate) url += `&end_date=${endDate}`;
 
-      const res = await api.get(url);
+      // 👇 Hacemos la consulta doble (Historial + Facturas Pendientes para el cálculo)
+      const [res, pendingRes] = await Promise.all([
+        api.get(url),
+        api.get(`/purchases/suppliers/${id}/pending_invoices/`),
+      ]);
 
       if (reset) {
         setTransactions(res.data.results);
@@ -63,8 +77,14 @@ const SupplierStatement = () => {
         setTransactions((prev) => [...prev, ...res.data.results]);
       }
 
-      // 👇 MAGIA: El botón SOLO aparecerá si la página actual es menor al total de páginas
       setHasMore(p < res.data.total_pages);
+
+      // Calculamos la deuda pendiente real sumando las facturas en PENDING
+      const totalPending = pendingRes.data.reduce(
+        (sum: number, inv: any) => sum + parseFloat(inv.total_net_pay),
+        0,
+      );
+      setPendingDebt(totalPending);
 
       if (!supplier) {
         const suppRes = await api.get(`/purchases/suppliers/${id}/`);
@@ -77,7 +97,6 @@ const SupplierStatement = () => {
     }
   };
 
-  // 👇 NUEVA FUNCIÓN: Ahora sí llama a la base de datos al cambiar de página
   const handleLoadMore = () => {
     const nextPage = page + 1;
     setPage(nextPage);
@@ -93,14 +112,11 @@ const SupplierStatement = () => {
     fetchStatement(true);
   };
 
-  // 👇 NUEVO: Función que llama a nuestro nuevo Endpoint de Auditoría
   const handleSyncBalance = async () => {
     if (!id) return;
     setIsSyncing(true);
     try {
       const res = await api.post(`/purchases/suppliers/${id}/sync_balance/`);
-
-      // Actualizamos el saldo visualmente de inmediato con el dato auditado
       setSupplier((prev: any) => ({
         ...prev,
         balance: res.data.new_balance,
@@ -113,15 +129,19 @@ const SupplierStatement = () => {
     }
   };
 
-  const isDebt = (type: string) => type === "COMPRA";
+  const isDebt = (type: string) => type === "COMPRA" || type === "NOTA_DEBITO";
+
+  // --- MATEMÁTICA DE CONCILIACIÓN ---
+  const netBalance = parseFloat(supplier?.balance || "0");
+  const availableAdvance = Math.max(0, pendingDebt - netBalance);
 
   return (
     <div className="p-6 max-w-6xl mx-auto animate-in fade-in duration-500">
       {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => navigate(-1)}
+            onClick={() => navigate("/treasury/payables")}
             className="p-2 hover:bg-slate-200 rounded-full transition text-slate-500"
             title="Volver"
           >
@@ -137,60 +157,78 @@ const SupplierStatement = () => {
           </div>
         </div>
 
-        {/* SALDO GIGANTE */}
-        <div className="text-right bg-slate-900 text-white p-5 rounded-2xl shadow-xl min-w-[250px] transition-all">
-          {/* 👇 NUEVO: Título con botón de sincronización al lado */}
-          <div className="flex justify-between items-center mb-1 gap-4">
-            <p className="text-xs text-slate-400 uppercase font-bold tracking-wider">
-              Estado de Cuenta
-            </p>
-            <button
-              onClick={handleSyncBalance}
-              disabled={isSyncing}
-              className="text-slate-400 hover:text-blue-400 transition disabled:opacity-50 flex items-center gap-1"
-              title="Auditar y Sincronizar Saldo"
-            >
-              <RefreshCw
-                size={14}
-                className={isSyncing ? "animate-spin text-blue-400" : ""}
-              />
-            </button>
-          </div>
+        <button
+          onClick={handleSyncBalance}
+          disabled={isSyncing}
+          className="flex items-center gap-2 bg-slate-800 text-white px-4 py-2.5 rounded-lg hover:bg-slate-700 transition disabled:opacity-50 text-sm font-bold shadow-md"
+          title="Auditar y Sincronizar Saldo"
+        >
+          <RefreshCw
+            size={16}
+            className={isSyncing ? "animate-spin text-blue-400" : ""}
+          />
+          {isSyncing ? "Sincronizando..." : "Auditar Saldos"}
+        </button>
+      </div>
 
-          {parseFloat(supplier?.balance || 0) > 0 ? (
-            <>
-              <h2 className="text-4xl font-black text-red-400">
-                S/{" "}
-                {parseFloat(supplier?.balance || 0).toLocaleString("es-PE", {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
-              </h2>
-              <p className="text-[11px] text-red-300/80 mt-1 font-medium">
-                ⚠️ Tienes una deuda pendiente
-              </p>
-            </>
-          ) : parseFloat(supplier?.balance || 0) < 0 ? (
-            <>
-              <h2 className="text-4xl font-black text-green-400">
-                + S/{" "}
-                {Math.abs(parseFloat(supplier?.balance || 0)).toLocaleString(
-                  "es-PE",
-                  { minimumFractionDigits: 2, maximumFractionDigits: 2 },
-                )}
-              </h2>
-              <p className="text-[11px] text-green-300/80 mt-1 font-medium">
-                ✅ Saldo a tu favor
-              </p>
-            </>
-          ) : (
-            <>
-              <h2 className="text-4xl font-black text-slate-300">S/ 0.00</h2>
-              <p className="text-[11px] text-slate-500 mt-1 font-medium">
-                ✔️ Cuentas saldadas
-              </p>
-            </>
-          )}
+      {/* 👇 NUEVO PANEL DE CONCILIACIÓN (3 TARJETAS) 👇 */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        {/* Tarjeta 1: Deuda Operativa (Lo que tienes que pagar) */}
+        <div className="bg-white p-5 rounded-2xl shadow-sm border-l-4 border-l-red-500 border border-y-slate-200 border-r-slate-200 relative overflow-hidden">
+          <div className="absolute right-[-10px] top-[-10px] opacity-5">
+            <FileText size={100} />
+          </div>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+            <AlertCircle size={14} className="text-red-500" /> Facturas
+            Pendientes
+          </p>
+          <h3 className="text-3xl font-black text-slate-800">
+            S/ {pendingDebt.toFixed(2)}
+          </h3>
+          <p className="text-[10px] text-slate-400 mt-2">
+            Deuda pendiente de cruce o pago.
+          </p>
+        </div>
+
+        {/* Tarjeta 2: Anticipos (Tu plata guardada) */}
+        <div className="bg-white p-5 rounded-2xl shadow-sm border-l-4 border-l-green-500 border border-y-slate-200 border-r-slate-200 relative overflow-hidden">
+          <div className="absolute right-[-10px] top-[-10px] opacity-5">
+            <Wallet size={100} />
+          </div>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
+            <Wallet size={14} className="text-green-500" /> Anticipos / A Favor
+          </p>
+          <h3 className="text-3xl font-black text-slate-800">
+            S/ {availableAdvance.toFixed(2)}
+          </h3>
+          <p className="text-[10px] text-slate-400 mt-2">
+            Dinero disponible para cruzar.
+          </p>
+        </div>
+
+        {/* Tarjeta 3: Saldo Contable (El neto final) */}
+        <div
+          className={`p-5 rounded-2xl shadow-sm border-l-4 relative overflow-hidden ${netBalance > 0 ? "bg-red-50 border-l-red-600 border-red-100" : netBalance < 0 ? "bg-green-50 border-l-green-600 border-green-100" : "bg-slate-50 border-l-slate-400 border-slate-200"}`}
+        >
+          <p
+            className={`text-xs font-bold uppercase tracking-wider mb-1 ${netBalance > 0 ? "text-red-700" : netBalance < 0 ? "text-green-700" : "text-slate-500"}`}
+          >
+            Saldo Contable Neto
+          </p>
+          <h3
+            className={`text-3xl font-black ${netBalance > 0 ? "text-red-600" : netBalance < 0 ? "text-green-600" : "text-slate-600"}`}
+          >
+            S/ {Math.abs(netBalance).toFixed(2)}
+          </h3>
+          <p
+            className={`text-[10px] font-bold mt-2 ${netBalance > 0 ? "text-red-500" : netBalance < 0 ? "text-green-600" : "text-slate-400"}`}
+          >
+            {netBalance > 0
+              ? "DEUDA GLOBAL"
+              : netBalance < 0
+                ? "A FAVOR GLOBAL"
+                : "CUENTAS SALDADAS"}
+          </p>
         </div>
       </div>
 
