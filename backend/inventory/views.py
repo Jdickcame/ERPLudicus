@@ -1,7 +1,9 @@
+import datetime
 from decimal import Decimal
 
 import openpyxl
 from core.mixins import BranchAccessMixin
+from core.pagination import StandardResultsSetPagination
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.http import HttpResponse
@@ -11,7 +13,6 @@ from django_filters.rest_framework import DjangoFilterBackend
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -20,6 +21,8 @@ from .models import (
     InventoryAdjustment,
     InventoryAdjustmentDetail,
     Kardex,
+    PhysicalInventory,
+    PhysicalInventoryDetail,
     Product,
     ProductRecipe,
     Stock,
@@ -30,18 +33,13 @@ from .serializers import (
     CategorySerializer,
     InventoryAdjustmentSerializer,
     KardexSerializer,
+    PhysicalInventorySerializer,
     ProductRecipeSerializer,
     ProductSerializer,
     StockSerializer,
     TagSerializer,
     TransferSerializer,
 )
-
-
-class DynamicPagination(PageNumberPagination):
-    page_size = 10
-    page_size_query_param = "page_size"  # Permite cambiar a 20, 50, etc.
-    max_page_size = 1000
 
 
 # --- 1. CATEGORÍAS Y ETIQUETAS ---
@@ -156,6 +154,9 @@ class ProductViewSet(BranchAccessMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save()
 
     def perform_destroy(self, instance):
         instance.delete()
@@ -315,11 +316,13 @@ class ProductRecipeViewSet(viewsets.ModelViewSet):
 class StockViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     serializer_class = StockSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["product__name", "product__sku", "product__category__name"]
+    ordering_fields = ["id", "product__name", "quantity"]
+    ordering = ["id"]
 
     def get_queryset(self):
-        queryset = Stock.objects.filter(
-            product__is_active=True, is_active=True
-        ).select_related("product", "branch")
         branch_id = self.request.query_params.get("branch_id")
         queryset = Stock.objects.filter(product__is_active=True).order_by("id")
         queryset = queryset.select_related("product", "product__category", "branch")
@@ -462,30 +465,36 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-        # 1. Crear la cabecera del Ajuste
-        adjustment = InventoryAdjustment.objects.create(
-            branch_id=branch_id, type=adj_type, reason=reason, created_by=request.user
-        )
+                adjustment = InventoryAdjustment.objects.create(
+                    branch_id=branch_id,
+                    type=adj_type,
+                    reason=reason,
+                    created_by=request.user,
+                )
 
-        # Mapeo de reglas: Si es Producción, también es una "Entrada" del producto terminado
-        is_entry = adj_type in ["MERMA_RETURN", "ADJUST_IN", "INITIAL", "PRODUCTION"]
+                is_entry = adj_type in [
+                    "MERMA_RETURN",
+                    "ADJUST_IN",
+                    "INITIAL",
+                    "PRODUCTION",
+                ]
 
-        kardex_type_map = {
-            "MERMA_OUT": "OUT_MERMA",
-            "MERMA_RETURN": "IN_RETURN",
-            "INTERNAL": "OUT_ADJUSTMENT",
-            "ADJUST_IN": "IN_ADJUSTMENT",
-            "ADJUST_OUT": "OUT_ADJUSTMENT",
-            "INITIAL": "IN_ADJUSTMENT",
-            "PRODUCTION": "IN_PRODUCTION",  # 👈 El nuevo
-        }
-        k_type = kardex_type_map.get(adj_type, "OUT_ADJUSTMENT")
+                kardex_type_map = {
+                    "MERMA_OUT": "OUT_MERMA",
+                    "MERMA_RETURN": "IN_RETURN",
+                    "INTERNAL": "OUT_ADJUSTMENT",
+                    "ADJUST_IN": "IN_ADJUSTMENT",
+                    "ADJUST_OUT": "OUT_ADJUSTMENT",
+                    "INITIAL": "IN_ADJUSTMENT",
+                    "PRODUCTION": "IN_PRODUCTION",
+                }
+                k_type = kardex_type_map.get(adj_type, "OUT_ADJUSTMENT")
 
-        for item in details:
-            product = get_object_or_404(Product, id=item.get("product_id"))
+                for item in details:
+                    product = get_object_or_404(Product, id=item.get("product_id"))
 
-            if not product.manage_stock:
-                continue
+                    if not product.manage_stock:
+                        continue
 
                     qty = Decimal(str(item.get("quantity", 0)))
                     if qty <= Decimal("0"):
@@ -493,108 +502,135 @@ class InventoryAdjustmentViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                             f"La cantidad de '{product.name}' debe ser mayor a 0."
                         )
 
-            stock, created = Stock.objects.select_for_update().get_or_create(
-                branch_id=branch_id,
-                product=product,
-                defaults={"quantity": 0, "average_cost": 0},
-            )
-
-            # Lógica de Salida vs Entrada
-            if not is_entry:
-                if stock.quantity < qty:
-                    raise ValueError(
-                        f"Stock insuficiente para {product.name}. Actual: {stock.quantity}"
+                    stock, _ = Stock.objects.select_for_update().get_or_create(
+                        branch_id=branch_id,
+                        product=product,
+                        defaults={
+                            "quantity": Decimal("0"),
+                            "average_cost": Decimal("0"),
+                        },
                     )
-                costo_unitario = stock.average_cost
-                qty_kardex = -qty
-                stock.quantity -= qty
-            else:
-                costo_unitario = Decimal(str(item.get("unit_cost", stock.average_cost)))
 
-                total_value_old = stock.quantity * stock.average_cost
-                total_value_new = qty * costo_unitario
-                new_qty = stock.quantity + qty
-                stock.average_cost = (
-                    (total_value_old + total_value_new) / new_qty if new_qty > 0 else 0
-                )
-                qty_kardex = qty
-                stock.quantity = new_qty
+                    stock_qty = (
+                        Decimal(str(stock.quantity)) if stock.quantity else Decimal("0")
+                    )
+                    avg_cost = (
+                        Decimal(str(stock.average_cost))
+                        if stock.average_cost
+                        else Decimal("0")
+                    )
 
-            stock.save()
+                    if not is_entry:
+                        if stock_qty < qty:
+                            raise ValueError(
+                                f"Stock insuficiente para '{product.name}'. Intentas retirar {qty}, pero solo hay {stock_qty}."
+                            )
+                        costo_unitario = avg_cost
+                        qty_kardex = -qty
+                        new_qty = stock_qty - qty
+                    else:
+                        costo_unitario = Decimal(str(item.get("unit_cost", avg_cost)))
+                        total_value_old = stock_qty * avg_cost
+                        total_value_new = qty * costo_unitario
+                        new_qty = stock_qty + qty
 
-            InventoryAdjustmentDetail.objects.create(
-                adjustment=adjustment,
-                product=product,
-                quantity=qty,
-                unit_cost=costo_unitario,
-            )
+                        if new_qty > Decimal("0"):
+                            stock.average_cost = (
+                                total_value_old + total_value_new
+                            ) / new_qty
+                        else:
+                            stock.average_cost = Decimal("0")
 
-            Kardex.objects.create(
-                branch_id=branch_id,
-                product=product,
-                type=k_type,
-                quantity=qty_kardex,
-                unit_cost=costo_unitario,
-                total_cost=qty * costo_unitario,
-                balance_quantity=stock.quantity,
-                balance_unit_cost=stock.average_cost,
-                balance_total_cost=stock.quantity * stock.average_cost,
-                user=request.user,
-                reference_document=f"AJUSTE #{adjustment.id}",
-                description=reason,
-            )
+                        qty_kardex = qty
+
+                    stock.quantity = new_qty
+                    stock.save()
+
+                    InventoryAdjustmentDetail.objects.create(
+                        adjustment=adjustment,
+                        product=product,
+                        quantity=qty,
+                        unit_cost=costo_unitario,
+                    )
+
+                    Kardex.objects.create(
+                        branch_id=branch_id,
+                        product=product,
+                        type=k_type,
+                        quantity=qty_kardex,
+                        unit_cost=costo_unitario,
+                        total_cost=qty * costo_unitario,
+                        balance_quantity=stock.quantity,
+                        balance_unit_cost=stock.average_cost,
+                        balance_total_cost=stock.quantity * stock.average_cost,
+                        user=request.user,
+                        reference_document=f"AJUSTE #{adjustment.id}",
+                        description=reason,
+                    )
 
                     if adj_type == "PRODUCTION" and product.has_recipe:
                         ingredients = ProductRecipe.objects.filter(
                             finished_product=product
                         )
 
-                if not ingredients.exists():
-                    raise ValueError(
-                        f"El producto {product.name} no tiene una receta configurada para producirse."
-                    )
+                        if not ingredients.exists():
+                            raise ValueError(
+                                f"El producto '{product.name}' no tiene una receta configurada para producirse."
+                            )
 
-                for recipe_item in ingredients:
-                    insumo = recipe_item.ingredient
+                        for recipe_item in ingredients:
+                            insumo = recipe_item.ingredient
 
-                    # ¿Cuánto insumo se necesita? (Cant producida * cantidad en receta)
-                    # Ej: Si haces 10 Kg masa, y la receta pide 0.6 Kg harina -> 10 * 0.6 = 6 Kg
-                    qty_to_deduct = qty * recipe_item.quantity
+                            recipe_qty = (
+                                Decimal(str(recipe_item.quantity))
+                                if recipe_item.quantity
+                                else Decimal("0")
+                            )
+                            qty_to_deduct = qty * recipe_qty
 
-                    # Buscamos el stock del insumo
-                    stock_insumo, _ = Stock.objects.select_for_update().get_or_create(
-                        branch_id=branch_id,
-                        product=insumo,
-                        defaults={"quantity": 0, "average_cost": 0},
-                    )
+                            stock_insumo, _ = (
+                                Stock.objects.select_for_update().get_or_create(
+                                    branch_id=branch_id,
+                                    product=insumo,
+                                    defaults={
+                                        "quantity": Decimal("0"),
+                                        "average_cost": Decimal("0"),
+                                    },
+                                )
+                            )
 
-                    # Opcional: Podrías bloquear si no hay insumos con el 'if stock_insumo.quantity < qty_to_deduct'
-                    # Pero en restaurantes es mejor permitir saldo negativo temporal para no frenar la cocina
+                            costo_insumo = (
+                                Decimal(str(stock_insumo.average_cost))
+                                if stock_insumo.average_cost
+                                else Decimal("0")
+                            )
+                            stock_ins_qty = (
+                                Decimal(str(stock_insumo.quantity))
+                                if stock_insumo.quantity
+                                else Decimal("0")
+                            )
 
-                    costo_insumo = stock_insumo.average_cost
-                    stock_insumo.quantity -= qty_to_deduct
-                    stock_insumo.save()
+                            stock_insumo.quantity = stock_ins_qty - qty_to_deduct
+                            stock_insumo.save()
 
-                    # Guardamos el Kardex silencioso del insumo
-                    Kardex.objects.create(
-                        branch_id=branch_id,
-                        product=insumo,
-                        type="OUT_PRODUCTION",
-                        quantity=-qty_to_deduct,
-                        unit_cost=costo_insumo,
-                        total_cost=qty_to_deduct * costo_insumo,
-                        balance_quantity=stock_insumo.quantity,
-                        balance_unit_cost=stock_insumo.average_cost,
-                        balance_total_cost=stock_insumo.quantity
-                        * stock_insumo.average_cost,
-                        user=request.user,
-                        reference_document=f"PROD #{adjustment.id}",
-                        description=f"Consumo automático para fabricar {qty}x {product.name}",
-                    )
-            # 👆🔥 FIN DE LA MAGIA DE RECETAS 🔥👆
+                            Kardex.objects.create(
+                                branch_id=branch_id,
+                                product=insumo,
+                                type="OUT_PRODUCTION",
+                                quantity=-qty_to_deduct,
+                                unit_cost=costo_insumo,
+                                total_cost=qty_to_deduct * costo_insumo,
+                                balance_quantity=stock_insumo.quantity,
+                                balance_unit_cost=stock_insumo.average_cost,
+                                balance_total_cost=stock_insumo.quantity
+                                * stock_insumo.average_cost,
+                                user=request.user,
+                                reference_document=f"PROD #{adjustment.id}",
+                                description=f"Consumo automático para fabricar {qty}x {product.name}",
+                            )
 
-        serializer = self.get_serializer(adjustment)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+                serializer = self.get_serializer(adjustment)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         except ValueError as ve:
             return Response({"error": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
@@ -615,6 +651,7 @@ class TransferViewSet(BranchAccessMixin, viewsets.ModelViewSet):
     queryset = Transfer.objects.all().order_by("-created_at")
     serializer_class = TransferSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)

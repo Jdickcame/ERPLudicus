@@ -69,10 +69,10 @@ def _serialize_for_sunat(payload):
 
 
 class InvoiceService:
-    def __init__(self, sale):
+    def __init__(self, sale=None):
         self.sale = sale
-        self.branch = sale.branch
-        self.customer = sale.customer
+        self.branch = sale.branch if sale else None
+        self.customer = sale.customer if sale else None
 
         self.base_url = API_URL
         self.headers = {
@@ -81,15 +81,13 @@ class InvoiceService:
         }
 
     def generar_comprobante(self):
-        print(
-            f"🚀 Iniciando facturación para Venta {self.sale.series}-{self.sale.number}"
-        )
+        print(f"Iniciando facturacion para Venta {self.sale.series}-{self.sale.number}")
 
         tipo_doc = "01" if self.sale.invoice_type_code == "01" else "03"
 
         # --- 1. LÓGICA DE IDENTIFICACIÓN DEL CLIENTE ---
         if self.customer:
-            client_num = self.customer.tax_id
+            client_num = self.customer.tax_id.strip() if self.customer.tax_id else ""
             client_name = self.customer.name
 
             doc_mapping = {
@@ -203,7 +201,7 @@ class InvoiceService:
             "tipoOperacion": "0101",
             "tipoDoc": tipo_doc,
             "serie": self.sale.series,
-            "correlativo": self.sale.number,
+            "correlativo": str(self.sale.number),
             "fechaEmision": self.sale.date.strftime("%Y-%m-%dT%H:%M:%S-05:00"),
             "formaPago": {"moneda": "PEN", "tipo": "Contado"},
             "tipoMoneda": "PEN",
@@ -213,22 +211,22 @@ class InvoiceService:
                 "rznSocial": client_name,
                 "address": {
                     "direccion": client_address,
-                    "ubigueo": "150101",
-                    "departamento": "LIMA",
                     "provincia": "LIMA",
+                    "departamento": "LIMA",
                     "distrito": "LIMA",
+                    "ubigueo": "150101",
                 },
             },
             "company": {
                 "ruc": "20491934671",
                 "razonSocial": "AGA CORP S.A.C.",
-                "nombreComercial": "AGA CORP",
+                "nombreComercial": "LUDICUS PARK",
                 "address": {
                     "direccion": "CAL. SIQUEIROS NRO. 110 URB. LA CALERA",
-                    "ubigueo": "150101",
-                    "departamento": "LIMA",
                     "provincia": "LIMA",
+                    "departamento": "LIMA",
                     "distrito": "SURQUILLO",
+                    "ubigueo": "150101",
                 },
             },
             "mtoOperGravadas": total_gravada_neta,
@@ -262,9 +260,11 @@ class InvoiceService:
                 headers=self.headers,
                 timeout=12,
             )
-            result = response.json()
 
-            print(f"📦 Respuesta ApisPeru: {result}")
+            try:
+                result = response.json()
+            except:  # noqa: E722
+                result = {"message": f"Error de formato HTTP {response.status_code}"}
 
             audit_result = result.copy()
 
@@ -365,24 +365,19 @@ class InvoiceService:
                     f"correlativo={self.sale.number}&tipo={tipo_doc}&"
                     f"format=ticket"
                 )
-                self.sale.sunat_pdf_url = pdf_url
-                print(f"🖨️ PDF Generado: {pdf_url}")
 
-                self.sale.save()
-                return {"success": True, "data": result}
-            else:
-                print(f"❌ Error ApisPeru: {result}")
-                self.sale.sunat_status = "REJECTED"
-                self.sale.sunat_description = result.get(
-                    "message", "Error en estructura XML/JSON"
-                )
-                self.sale.save()
-                return {"success": False, "error": result}
+            self.sale.save()
+            return {"success": self.sale.sunat_status == "ACCEPTED", "data": result}
+
+        except requests.exceptions.Timeout:
+            self.sale.sunat_status = "PENDING"
+            self.sale.sunat_description = "SUNAT demoro. En cola para verificacion."
+            self.sale.save()
+            return {"success": False, "error": "Timeout"}
 
         except Exception as e:
-            print(f"❌ Error de Conexión: {e}")
             self.sale.sunat_status = "PENDING"
-            self.sale.sunat_description = str(e)
+            self.sale.sunat_description = f"Error: {str(e)[:50]}"
             self.sale.save()
             return {"success": False, "error": str(e)}
 
@@ -502,26 +497,36 @@ class InvoiceService:
             "ublVersion": "2.1",
             "tipoDoc": note.note_type,
             "serie": note.series,
-            "correlativo": note.number,
+            "correlativo": str(note.number),
             "fechaEmision": note.date.strftime("%Y-%m-%dT%H:%M:%S-05:00"),
             "tipDocAfectado": sale.invoice_type_code,
-            "numDocfectado": f"{sale.series}-{sale.number}",
+            "numDocfectado": f"{sale.series}-{str(sale.number).zfill(8)}",
             "codMotivo": note.reason_code,
             "desMotivo": note.description,
             "tipoMoneda": "PEN",
             "client": {
-                "tipoDoc": sale.customer.document_type if sale.customer else "0",
-                "numDoc": sale.customer.tax_id if sale.customer else "00000000",
-                "rznSocial": sale.customer.name if sale.customer else "PUBLICO GENERAL",
+                "tipoDoc": tipo_doc_cliente,
+                "numDoc": num_doc_cliente,
+                "rznSocial": rzn_social,
                 "address": {
-                    "direccion": sale.customer.address if sale.customer else "-"
+                    "direccion": direccion,
+                    "provincia": "LIMA",
+                    "departamento": "LIMA",
+                    "distrito": "LIMA",
+                    "ubigueo": "150101",
                 },
             },
             "company": {
                 "ruc": "20491934671",
-                "ruc": "20491934671",
                 "razonSocial": "AGA CORP S.A.C.",
-                "address": {"direccion": "Cal. Siqueiros Nro 110 - Surquillo"},
+                "nombreComercial": "LUDICUS PARK",
+                "address": {
+                    "direccion": "CAL. SIQUEIROS NRO. 110 URB. LA CALERA",
+                    "provincia": "LIMA",
+                    "departamento": "LIMA",
+                    "distrito": "SURQUILLO",
+                    "ubigueo": "150101",
+                },
             },
             "mtoOperGravadas": total_gravada_neta,
             "mtoIGV": total_igv_neto,
@@ -653,15 +658,17 @@ class InvoiceService:
                     f"format=ticket"
                 )
                 note.sunat_pdf_url = pdf_url
-                note.save()
-                print("✅ Nota enviada correctamente")
-            else:
-                print(f"❌ Error API: {r.text}")
 
-            return result
+        except requests.exceptions.Timeout:
+            note.sunat_status = "PENDING"
+            note.sunat_description = "SUNAT demoro. En cola para verificacion."
+
         except Exception as e:
-            print(f"❌ Error conexión: {e}")
-            return None
+            note.sunat_status = "PENDING"
+            note.sunat_description = f"Error: {str(e)[:50]}"
+
+        note.save()
+        return result
 
     def _number_to_words(self, amount):
         from num2words import num2words

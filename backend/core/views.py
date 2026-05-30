@@ -1,20 +1,11 @@
 from rest_framework import viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 
 from .models import ExchangeRate
+from .pagination import StandardResultsSetPagination
 from .serializers import ExchangeRateSerializer
-
-
-# Definimos una clase de paginación flexible
-class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 10  # Por defecto mostrará 10
-    page_size_query_param = (
-        "page_size"  # Esto permite que el frontend pida más (ej: ?page_size=20)
-    )
-    max_page_size = 100
 
 
 # 1. PERMISO PERSONALIZADO (Se mantiene igual)
@@ -30,7 +21,7 @@ class IsAdminRole(BasePermission):
         )
 
 
-# 👇 2. CAMBIO IMPORTANTE: HEREDAMOS DE ModelViewSet
+# 2. HEREDAMOS DE ModelViewSet
 class ExchangeRateViewSet(viewsets.ModelViewSet):
     # Definimos el queryset para que 'list' sepa qué devolver (ordenado por fecha)
     queryset = ExchangeRate.objects.all().order_by("-date")
@@ -44,14 +35,11 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
 
-    # NOTA: Borramos 'def list' y 'def create'.
-    # ModelViewSet ya los trae hechos correctamente (devolviendo listas).
-
     def perform_create(self, serializer):
         # Guardamos quién lo creó automáticamente
         serializer.save(created_by=self.request.user)
 
-    # 👇 3. LÓGICA DE BÚSQUEDA INTELIGENTE
+    # 3. LÓGICA DE BÚSQUEDA INTELIGENTE
     @action(detail=False, methods=["get"])
     def get_rate(self, request):
         date_str = request.query_params.get("date")
@@ -72,7 +60,6 @@ class ExchangeRateViewSet(viewsets.ModelViewSet):
         if last_rate:
             # Devolvemos el valor anterior pero avisando la fecha original
             data = ExchangeRateSerializer(last_rate).data
-            # Opcional: Podrías inyectar la fecha solicitada si quisieras
             return Response(data)
 
         # Si no hay historia, valores por defecto

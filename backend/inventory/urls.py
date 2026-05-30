@@ -6,6 +6,7 @@ from .views import (
     CategoryViewSet,
     InventoryAdjustmentViewSet,
     KardexViewSet,
+    PhysicalInventoryViewSet,
     ProductRecipeViewSet,
     ProductViewSet,
     StockViewSet,
@@ -23,6 +24,9 @@ router.register(r"stocks", StockViewSet, basename="stock")
 router.register(r"adjustments", InventoryAdjustmentViewSet, basename="adjustment")
 router.register(r"transfers", TransferViewSet, basename="transfer")
 router.register(r"kardex", KardexViewSet, basename="kardex")
+router.register(
+    r"physical-inventory", PhysicalInventoryViewSet, basename="physical-inventory"
+)
 
 urlpatterns = [
     # Incluimos todas las rutas que genera el router automáticamente

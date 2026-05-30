@@ -1,4 +1,4 @@
-from django.apps import apps
+from django.apps import apps  # 👈 Usaremos esto en su lugar
 from rest_framework import serializers
 
 from .models import CashMovement, CashRegister, CashShift

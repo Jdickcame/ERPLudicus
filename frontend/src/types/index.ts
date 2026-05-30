@@ -11,6 +11,8 @@ export interface Branch {
   id: number;
   name: string;
   code: string;
+  address: string;
+  phone: string;
 }
 
 export interface User {

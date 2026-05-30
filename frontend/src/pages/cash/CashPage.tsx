@@ -1,20 +1,31 @@
+import { Capacitor } from "@capacitor/core";
 import {
   AlertTriangle,
   ArrowRightLeft,
   Banknote,
+  CheckCircle,
   CreditCard,
   Eye,
   EyeOff,
   History,
   Link,
   Lock,
+  LogOut,
+  Printer,
+  TrendingUp,
+  WifiOff,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { v4 as uuidv4 } from "uuid";
 import api from "../../api/axios";
 import PinPad from "../../components/common/PinPad";
 import { useAuth } from "../../context/AuthContext";
+import { useBranch } from "../../context/BranchContext";
+import { db } from "../../db/database";
+import { useSync } from "../../hooks/useSync";
+import { BluetoothPrinter } from "../../utils/BluetoothPrinter";
 import PosHeader from "../pos/components/PosHeader";
 
 // --- INTERFACES ---
@@ -52,9 +63,12 @@ interface CashShift {
 }
 
 const CashPage = () => {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
+  const { currentBranch } = useBranch();
   const navigate = useNavigate();
   const location = useLocation();
+
+  useSync(currentBranch?.id);
 
   const isManager =
     user?.role === "ADMIN" || user?.role === "MANAGER" || user?.is_superuser;
@@ -184,8 +198,8 @@ const CashPage = () => {
   };
 
   const [initialAmount, setInitialAmount] = useState("");
+  const [selectedRegisterId, setSelectedRegisterId] = useState<string>("");
 
-  // 👇 NUEVOS ESTADOS DE MOVIMIENTOS
   const [showMovementForm, setShowMovementForm] = useState(false);
   const [movementType, setMovementType] = useState<"IN" | "OUT">("OUT");
   const [movementAmount, setMovementAmount] = useState("");
@@ -219,8 +233,10 @@ const CashPage = () => {
 
   const isPosMode = location.pathname.startsWith("/pos");
 
-  const loadCashStatus = async () => {
-    setLoading(true);
+  const loadCashStatus = async (isBackground = false) => {
+    if (!currentBranch) return;
+    if (!isBackground) setLoading(true);
+
     try {
       if (!navigator.onLine) throw new Error("Offline");
 
@@ -357,22 +373,100 @@ const CashPage = () => {
     } catch (error) {
       await loadCashFromCache(isBackground);
     } finally {
-      setLoading(false);
+      if (!isBackground) setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadCashStatus();
-  }, []);
+    let isMounted = true;
+
+    const verifyConnection = async (isBackground = false) => {
+      const isConnected = await checkConnection();
+      if (!isMounted) return;
+      setIsOfflineMode(!isConnected);
+
+      if (isConnected) {
+        await loadCashStatus(isBackground);
+      } else {
+        await loadCashFromCache(isBackground);
+      }
+    };
+
+    verifyConnection(false);
+    const interval = setInterval(() => verifyConnection(true), 15000);
+
+    const handleOnline = () => {
+      setIsOfflineMode(false);
+      loadCashStatus(true);
+    };
+    const handleOffline = () => {
+      setIsOfflineMode(true);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [currentBranch?.id]);
+
+  const showTempError = (msg: string) => {
+    setGeneralError(msg);
+    setTimeout(() => setGeneralError(""), 4000);
+  };
+  const showTempSuccess = (msg: string) => {
+    setGeneralSuccess(msg);
+    setTimeout(() => setGeneralSuccess(""), 4000);
+  };
+
+  const handleToggleBalance = () => {
+    if (showSystemBalance) setShowSystemBalance(false);
+    else {
+      if (isManager) setShowSystemBalance(true);
+      else {
+        setBalancePin("");
+        setBalancePinError("");
+        setShowBalancePinModal(true);
+      }
+    }
+  };
+
+  const handleVerifyBalancePin = async () => {
+    if (balancePin.length < 4)
+      return setBalancePinError("El PIN debe tener al menos 4 dígitos");
+
+    const currentUserId = localStorage.getItem("current_user_id");
+    const allUsers = await db.users.toArray();
+    const userFound = allUsers.find(
+      (u) => String(u.pin) === String(balancePin),
+    );
+
+    if (userFound && userFound.id.toString() === currentUserId) {
+      setShowSystemBalance(true);
+      setShowBalancePinModal(false);
+      setBalancePin("");
+      setTimeout(() => setShowSystemBalance(false), 10000);
+    } else {
+      setBalancePinError("❌ PIN incorrecto. Ese no es tu PIN.");
+      setBalancePin("");
+    }
+  };
 
   const handleOpenShift = async () => {
-    if (!initialAmount) return alert("Ingresa el monto inicial");
-    if (registers.length === 0)
-      return alert("Error: No hay cajas configuradas");
+    if (!initialAmount) return showTempError("Ingresa el monto inicial");
+    if (!selectedRegisterId)
+      return showTempError("Selecciona una terminal primero");
+    if (isOfflineMode)
+      return showTempError("❌ No puedes abrir caja sin conexión a internet.");
+
     try {
-      await api.post("/cash/shifts/", {
+      const response = await api.post("/cash/shifts/", {
         initial_balance: initialAmount,
-        cash_register: registers[0].id,
+        cash_register: parseInt(selectedRegisterId),
       });
 
       const selectedReg = registers.find(
@@ -426,65 +520,94 @@ const CashPage = () => {
           Math.max(localNumTK, dbNumTK).toString(),
         );
       }
-    } catch (error) {
-      alert("Error al abrir caja");
+
+      localStorage.setItem("pos_shift_open", "true");
+      localStorage.setItem("pos_shift_id", response.data.id.toString());
+
+      if (isPosMode) navigate("/pos");
+      else loadCashStatus();
+    } catch (error: any) {
+      showTempError(
+        `❌ ${error.response?.data?.error || "Error al abrir caja"}`,
+      );
     }
   };
 
-  // FUNCIÓN PARA GUARDAR INGRESO O RETIRO
   const executeMovement = async (pinForBackend?: string) => {
+    const movUuid = uuidv4();
+    const currentShiftId =
+      shift?.id || parseInt(localStorage.getItem("pos_shift_id") || "0");
+
+    const payload = {
+      uuid: movUuid,
+      created_at: new Date().toISOString(),
+      shift: currentShiftId,
+      amount: movementAmount,
+      movement_type: movementType,
+      concept: movementType === "IN" ? "DEPOSIT" : "EXPENSE",
+      description: movementDesc,
+      supervisor_pin: pinForBackend,
+    };
+
     try {
-      await api.post("/cash/movements/", {
-        shift: shift?.id,
-        amount: movementAmount,
-        movement_type: movementType,
-        concept: movementType === "IN" ? "DEPOSIT" : "EXPENSE",
-        description: movementDesc,
-        pin_autorizacion: pinForBackend,
-      });
-
-      alert(
-        `✅ ${movementType === "IN" ? "Ingreso" : "Retiro"} registrado exitosamente.`,
-      );
-
+      await db.pending_movements.add({ ...payload, sync_status: "PENDING" });
+      if (navigator.onLine) {
+        await api.post("/cash/movements/", payload);
+        await db.pending_movements.delete(movUuid);
+        showTempSuccess(
+          `✅ ${
+            movementType === "IN" ? "Ingreso" : "Retiro"
+          } registrado exitosamente.`,
+        );
+      } else {
+        showTempSuccess(
+          `💾 Guardado Offline: El ${
+            movementType === "IN" ? "Ingreso" : "Retiro"
+          } se sincronizará luego.`,
+        );
+      }
+    } catch (error: any) {
+      await db.pending_movements.delete(movUuid);
+      showTempError("❌ Error: Operación denegada por el servidor.");
+    } finally {
       setMovementAmount("");
       setMovementDesc("");
       setShowMovementForm(false);
       setShowPinModal(false);
-      loadCashStatus();
-    } catch (error: any) {
-      alert(
-        "❌ Error: " +
-          JSON.stringify(error.response?.data || "Operación denegada"),
-      );
       setAuthPin("");
+      loadCashStatus();
     }
   };
 
-  // 👇 Lo que pasa al darle al botón "Guardar" verde/rojo
   const handleRequestMovement = () => {
     if (!movementAmount || parseFloat(movementAmount) <= 0)
-      return alert("Ingresa un monto válido");
-    if (!movementDesc) return alert("Completa la descripción");
-    if (!shift) return alert("No hay un turno abierto.");
+      return showTempError("Ingresa un monto válido");
+    if (!movementDesc) return showTempError("Completa la descripción");
+    if (!shift && !localStorage.getItem("pos_shift_id"))
+      return showTempError("No hay un turno abierto.");
 
-    if (isManager) {
-      // 🚀 ATajo: Si es admin, ejecuta directo sin pedir PIN
-      executeMovement();
-    } else {
-      // 🔒 Si es cajero, limpia el PIN y abre el candado
+    if (isManager) executeMovement();
+    else {
       setAuthPin("");
+      setAuthPinError("");
       setShowPinModal(true);
     }
   };
 
-  // 👇 Lo que pasa cuando el cajero digita el PIN del gerente y le da a Confirmar
   const handleConfirmMovement = async () => {
-    if (!shift) return;
-    if (authPin.length < 4)
-      return alert("El PIN debe tener al menos 4 dígitos");
+    if (authPin.length < 4) return;
+    const allUsers = await db.users.toArray();
+    const userFound = allUsers.find(
+      (u) =>
+        String(u.pin) === String(authPin) &&
+        (u.role === "ADMIN" || u.role === "MANAGER"),
+    );
 
-    // Aquí podrías validar el PIN primero en el backend, o pasarlo en executeMovement
+    if (!userFound) {
+      setAuthPinError("❌ PIN incorrecto o sin permisos de gerencia.");
+      setAuthPin("");
+      return;
+    }
     executeMovement(authPin);
   };
 
@@ -564,7 +687,7 @@ const CashPage = () => {
     const dPagoLink = parseFloat(declaredPagoLink) || 0;
     const totalDeclaredNet = dCash + dCard + dTransfer + dPagoLink;
 
-    const diffCash = dCash - shift.expected_cash;
+    const diffCash = dCash - netExpectedCash;
     const diffCard = dCard - shift.expected_card;
     const diffTransfer = dTransfer - shift.expected_transfer;
     const diffPagoLink = dPagoLink - (shift.expected_pago_link || 0);
@@ -704,11 +827,32 @@ const CashPage = () => {
 
   const executePrintX = async () => {
     if (!shift) return;
+    await printShiftReport("X");
+  };
+
+  const submitClose = async () => {
+    if (!shift || !closeConfirmData) return;
+    setLoading(true);
+    setShowCloseConfirmModal(false);
+
     try {
+      const baseAmount = parseFloat(shift.initial_balance) || 0;
+      const totalRealForBackend = closeConfirmData.totalDeclared + baseAmount;
+
       await api.post(`/cash/shifts/${shift.id}/close/`, {
-        final_balance_real: finalReal,
+        final_balance_real: totalRealForBackend,
       });
-      alert("🔒 Turno Cerrado Correctamente");
+
+      await printShiftReport("Z", closeConfirmData.totalDeclared);
+      showTempSuccess("🔒 Turno Cerrado Correctamente.");
+
+      localStorage.removeItem("pos_shift_open");
+      localStorage.removeItem("pos_shift_id");
+      localStorage.removeItem("pos_shift_data");
+      localStorage.removeItem("pos_cash_movements_cache");
+      localStorage.removeItem("pos_boleta_serie");
+      localStorage.removeItem("pos_factura_serie");
+
       setShift(null);
       setMovements([]);
       setDeclaredCash("");
@@ -718,16 +862,19 @@ const CashPage = () => {
 
       if (isPosMode) navigate("/pos-login");
     } catch (error) {
-      alert("Error al cerrar caja");
+      showTempError("Error al cerrar caja. Revisa tu conexión a internet.");
+      setLoading(false);
     }
   };
 
-  const canSeeBalance = user?.role === "ADMIN" || user?.is_superuser;
-
+  // 🌟 PANTALLA DE CARGA 🌟
   if (loading)
     return (
-      <div className="h-screen w-full flex items-center justify-center bg-slate-100 text-slate-500 animate-pulse">
-        Cargando estado de caja...
+      <div className="h-screen w-full flex items-center justify-center bg-slate-900 text-white flex-col gap-4 font-sans">
+        <div className="animate-spin rounded-full h-12 w-12 border-4 border-slate-700 border-t-blue-500"></div>
+        <p className="text-slate-400 font-bold uppercase tracking-widest text-sm">
+          Cargando estado de caja...
+        </p>
       </div>
     );
 
@@ -929,80 +1076,77 @@ const CashPage = () => {
                 </p>
               </div>
 
-                {/* 👇 INTERFAZ MODIFICADA PARA NUEVO MOVIMIENTO */}
-                {!showMovementForm ? (
-                  <button
-                    onClick={() => setShowMovementForm(true)}
-                    className="w-full py-3.5 border-2 border-dashed border-slate-300 bg-white text-slate-600 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-slate-50 transition-colors"
-                  >
-                    <ArrowRightLeft size={18} /> NUEVO MOVIMIENTO
-                  </button>
-                ) : (
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 animate-in slide-in-from-top-2">
-                    <div className="flex gap-2 mb-4">
-                      <button
-                        onClick={() => setMovementType("IN")}
-                        className={`flex-1 py-2 text-xs font-black uppercase tracking-wider rounded-lg border-2 transition-all ${
-                          movementType === "IN"
-                            ? "border-green-600 bg-green-100 text-green-700"
-                            : "border-transparent bg-white text-slate-400 hover:bg-slate-100"
-                        }`}
-                      >
-                        + Ingreso
-                      </button>
-                      <button
-                        onClick={() => setMovementType("OUT")}
-                        className={`flex-1 py-2 text-xs font-black uppercase tracking-wider rounded-lg border-2 transition-all ${
-                          movementType === "OUT"
-                            ? "border-red-600 bg-red-100 text-red-700"
-                            : "border-transparent bg-white text-slate-400 hover:bg-slate-100"
-                        }`}
-                      >
-                        - Retiro
-                      </button>
-                    </div>
-
-                    <input
-                      type="number"
-                      placeholder="Monto (S/)"
-                      className={`w-full p-2.5 mb-2 rounded-lg border-2 outline-none transition-colors font-bold text-lg text-center ${
+              {!showMovementForm ? (
+                <button
+                  onClick={() => setShowMovementForm(true)}
+                  className={`w-full py-4 border-2 border-dashed border-slate-300 bg-white text-slate-600 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all active:scale-95 active:bg-slate-100 ${hoverBtnSlate}`}
+                >
+                  <ArrowRightLeft size={18} /> REGISTRAR MOVIMIENTO
+                </button>
+              ) : (
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 animate-in slide-in-from-top-2 shadow-inner">
+                  <div className="flex gap-2 mb-4">
+                    <button
+                      onClick={() => setMovementType("IN")}
+                      className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider rounded-lg border-2 transition-all ${
                         movementType === "IN"
-                          ? "focus:border-green-400 text-green-700"
-                          : "focus:border-red-400 text-red-700"
+                          ? "border-green-600 bg-green-100 text-green-700"
+                          : `border-transparent bg-white text-slate-400 active:bg-slate-200 ${hoverBtnSlate}`
                       }`}
-                      value={movementAmount}
-                      onChange={(e) => setMovementAmount(e.target.value)}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Motivo detallado..."
-                      className="w-full p-2.5 mb-4 rounded-lg border border-slate-300 outline-none focus:border-blue-400 text-sm"
-                      value={movementDesc}
-                      onChange={(e) => setMovementDesc(e.target.value)}
-                    />
-
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setShowMovementForm(false)}
-                        className="flex-1 py-2.5 bg-white border border-slate-300 rounded-lg font-bold text-slate-500 text-sm hover:bg-slate-100"
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        onClick={handleRequestMovement}
-                        className={`flex-1 py-2.5 text-white rounded-lg font-bold text-sm shadow-md transition-colors ${
-                          movementType === "IN"
-                            ? "bg-green-600 hover:bg-green-700"
-                            : "bg-red-600 hover:bg-red-700"
-                        }`}
-                      >
-                        Guardar
-                      </button>
-                    </div>
+                    >
+                      + Ingreso
+                    </button>
+                    <button
+                      onClick={() => setMovementType("OUT")}
+                      className={`flex-1 py-2.5 text-xs font-black uppercase tracking-wider rounded-lg border-2 transition-all ${
+                        movementType === "OUT"
+                          ? "border-red-600 bg-red-100 text-red-700"
+                          : `border-transparent bg-white text-slate-400 active:bg-slate-200 ${hoverBtnSlate}`
+                      }`}
+                    >
+                      - Retiro
+                    </button>
                   </div>
-                )}
-              </div>
+                  <input
+                    type="number"
+                    placeholder="Monto (S/)"
+                    className={`w-full p-3 mb-3 rounded-lg border-2 outline-none transition-colors font-black text-xl text-center ${
+                      movementType === "IN"
+                        ? "focus:border-green-400 text-green-700"
+                        : "focus:border-red-400 text-red-700"
+                    }`}
+                    value={movementAmount}
+                    onChange={(e) => setMovementAmount(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Motivo detallado..."
+                    className="w-full p-3 mb-4 rounded-lg border border-slate-300 outline-none focus:border-blue-400 text-sm font-medium"
+                    value={movementDesc}
+                    onChange={(e) => setMovementDesc(e.target.value)}
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowMovementForm(false)}
+                      className={`flex-1 py-3 bg-white border border-slate-300 rounded-lg font-bold text-slate-500 text-sm transition-all active:bg-slate-200 ${hoverBtnSlate}`}
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      onClick={handleRequestMovement}
+                      className={`flex-1 py-3 text-white rounded-lg font-bold text-sm shadow-md transition-all active:scale-95 ${
+                        movementType === "IN"
+                          ? `bg-green-600 active:bg-green-700 ${hoverBtnGreen}`
+                          : `bg-red-600 active:bg-red-700 ${hoverBtnRed}`
+                      }`}
+                    >
+                      Guardar
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+          </div>
 
           {/* COLUMNA 2: Declaración de Cierre */}
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 opacity-95 flex flex-col">
@@ -1086,76 +1230,76 @@ const CashPage = () => {
             </div>
           </div>
 
-            {/* 3. HISTORIAL */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[520px]">
-              <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-2xl flex justify-between items-center">
-                <h3 className="font-bold flex items-center gap-2 text-sm text-slate-600">
-                  <History size={16} /> Movimientos del Turno
-                </h3>
-                <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold">
-                  Turno #{shift.id}
-                </span>
-              </div>
-              <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
-                {movements.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-slate-300 italic text-sm">
-                    Sin movimientos aún
-                  </div>
-                ) : (
-                  // 👇 MAGIA AQUÍ: Agrupamos los movimientos por descripción antes de renderizarlos
-                  Object.values(
-                    movements.reduce((acc: any, mov) => {
-                      const key = `${mov.description}-${mov.movement_type}`;
-                      if (!acc[key]) {
-                        acc[key] = {
-                          ...mov,
-                          numericAmount: parseFloat(mov.amount),
-                        };
-                      } else {
-                        acc[key].numericAmount += parseFloat(mov.amount);
-                      }
-                      return acc;
-                    }, {}),
-                  ).map((mov: any) => (
-                    <div
-                      key={mov.id}
-                      className="flex justify-between items-center p-3 border-b border-slate-50 last:border-0 hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="min-w-0 flex-1 pr-2">
-                        <p className="font-bold text-xs text-slate-700 truncate">
-                          {mov.description || mov.concept}
-                        </p>
-                        <p className="text-[10px] text-slate-400 uppercase font-medium">
-                          {new Date(mov.created_at).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}{" "}
-                          •
-                          <span
-                            className={
-                              mov.movement_type === "IN"
-                                ? "text-green-600"
-                                : "text-red-500"
-                            }
-                          >
-                            {" "}
-                            {mov.movement_type === "IN" ? "Ingreso" : "Salida"}
-                          </span>
-                        </p>
-                      </div>
-                      <span
-                        className={`font-black text-sm whitespace-nowrap ${mov.movement_type === "IN" ? "text-green-600" : "text-red-600"}`}
-                      >
-                        {mov.movement_type === "IN" ? "+" : "-"} S/{" "}
-                        {mov.numericAmount.toFixed(2)}
-                      </span>
+          {/* COLUMNA 3: Historial de Movimientos */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col lg:h-[calc(100vh-180px)] min-h-[400px]">
+            <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-2xl flex justify-between items-center shrink-0">
+              <h3 className="font-bold flex items-center gap-2 text-sm text-slate-600">
+                <History size={16} /> Movimientos
+              </h3>
+              <span className="text-[10px] bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full font-black tracking-widest uppercase">
+                Turno #{shift?.id || localStorage.getItem("pos_shift_id")}
+              </span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 custom-scrollbar relative">
+              {movements.length === 0 ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-300 italic text-sm">
+                  <ArrowRightLeft size={32} className="mb-2 opacity-20" />
+                  Sin movimientos aún
+                </div>
+              ) : (
+                Object.values(
+                  movements.reduce((acc: any, mov) => {
+                    const key = `${mov.description}-${mov.movement_type}`;
+                    if (!acc[key])
+                      acc[key] = {
+                        ...mov,
+                        numericAmount: parseFloat(mov.amount),
+                      };
+                    else acc[key].numericAmount += parseFloat(mov.amount);
+                    return acc;
+                  }, {}),
+                ).map((mov: any) => (
+                  <div
+                    key={mov.id}
+                    className={`flex justify-between items-center p-3.5 border-b border-slate-50 last:border-0 rounded-lg transition-colors active:bg-slate-100 ${hoverRowSlate}`}
+                  >
+                    <div className="min-w-0 flex-1 pr-3">
+                      <p className="font-bold text-xs text-slate-700 truncate mb-0.5">
+                        {mov.description || mov.concept}
+                      </p>
+                      <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+                        {new Date(mov.created_at).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}{" "}
+                        •{" "}
+                        <span
+                          className={
+                            mov.movement_type === "IN"
+                              ? "text-green-500"
+                              : "text-red-400"
+                          }
+                        >
+                          {mov.movement_type === "IN" ? "INGRESO" : "RETIRO"}
+                        </span>
+                      </p>
                     </div>
-                  ))
-                )}
-              </div>
+                    <span
+                      className={`font-black text-sm whitespace-nowrap ${
+                        mov.movement_type === "IN"
+                          ? "text-green-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {mov.movement_type === "IN" ? "+" : "-"} S/{" "}
+                      {mov.numericAmount.toFixed(2)}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
-        )}
+        </div>
       </div>
 
       {/* 🔥 MODALES 🔥 */}
@@ -1163,27 +1307,28 @@ const CashPage = () => {
       {/* Modal 1: PIN Movimientos */}
       {showPinModal && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl shadow-2xl p-6 w-[360px] relative animate-in zoom-in-95 duration-200">
-            {/* Botón para cerrar el modal */}
+          <div className="bg-white rounded-3xl shadow-2xl p-6 w-[360px] relative animate-in zoom-in-95 duration-200 border border-slate-200">
             <button
-              onClick={() => setShowPinModal(false)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-red-500 hover:bg-red-50 p-1 rounded-full transition-colors"
+              onClick={() => {
+                setShowPinModal(false);
+                setAuthPinError("");
+              }}
+              className={`absolute top-4 right-4 text-slate-400 active:text-red-500 active:bg-red-50 p-1.5 rounded-full transition-colors ${hoverCloseBtn}`}
             >
               <X size={24} />
             </button>
-
-            <div className="bg-slate-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-2 mt-4">
-              <Lock size={32} className="text-slate-800" />
-            </div>
-
-            {/* 👇 AQUÍ USAMOS TU COMPONENTE 👇 */}
             <PinPad
               pin={authPin}
-              setPin={setAuthPin}
+              setPin={(val) => {
+                setAuthPin(val);
+                setAuthPinError("");
+              }}
               onSubmit={handleConfirmMovement}
               maxLength={6}
               title="Autorización"
-              subtitle={`PIN para ${movementType === "IN" ? "ingresar" : "retirar"} S/ ${parseFloat(movementAmount).toFixed(2)}`}
+              subtitle={`PIN para ${
+                movementType === "IN" ? "ingresar" : "retirar"
+              } S/ ${parseFloat(movementAmount).toFixed(2)}`}
             />
             {authPinError && (
               <p className="text-red-500 text-[11px] font-bold text-center mt-2 animate-bounce bg-red-50 p-2 rounded-lg">

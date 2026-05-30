@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
+import Pagination from "../../components/common/Pagination";
 import { useBranch } from "../../context/BranchContext";
 
 // --- INTERFACES ---
@@ -52,6 +53,9 @@ const TransfersPage = () => {
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"OUT" | "IN">("OUT"); // OUT = Enviados, IN = Recibidos
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalCount, setTotalCount] = useState(0);
 
   // Estados del Formulario (Nuevo Traslado)
   const [showNewForm, setShowNewForm] = useState(false);
@@ -69,9 +73,12 @@ const TransfersPage = () => {
     if (!currentBranch) return;
     setLoading(true);
     try {
-      // 1. Cargamos todos los traslados
-      const resTransfers = await api.get(`/inventory/transfers/`);
+      // 1. Cargamos todos los traslados con paginación
+      const resTransfers = await api.get(`/inventory/transfers/`, {
+        params: { page, page_size: pageSize },
+      });
       setTransfers(resTransfers.data.results || resTransfers.data);
+      setTotalCount(resTransfers.data.count || 0);
 
       // 3. Cargamos el stock de la sede actual (para saber qué podemos enviar)
       const resStock = await api.get(
@@ -93,7 +100,7 @@ const TransfersPage = () => {
     loadData();
     setShowNewForm(false);
     setCart([]);
-  }, [currentBranch]);
+  }, [currentBranch, page, pageSize]);
 
   // --- FILTROS DE PESTAÑAS ---
   const filteredTransfers = transfers.filter((t) => {
@@ -504,6 +511,20 @@ const TransfersPage = () => {
           </table>
         )}
       </div>
+
+      {/* PAGINACIÓN */}
+      <Pagination
+        currentPage={page}
+        totalPages={Math.ceil(totalCount / pageSize) || 1}
+        totalCount={totalCount}
+        pageSize={pageSize}
+        loading={loading}
+        onPageChange={(newPage) => setPage(newPage)}
+        onPageSizeChange={(newSize) => {
+          setPageSize(newSize);
+          setPage(1);
+        }}
+      />
     </div>
   );
 };

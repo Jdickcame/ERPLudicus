@@ -35,11 +35,24 @@ const RecipeManager = () => {
   useEffect(() => {
     const fetchProducts = async () => {
       try {
-        // Pedimos los productos (idealmente con un page_size grande para llenar los selects)
-        const res = await api.get("/inventory/products/?page_size=500");
-        setProducts(res.data.results || res.data);
-      } catch (err) {
+        console.log("=== RecipeManager: Fetching products ===");
+        console.log("URL:", "/inventory/products/?is_active=&page_size=1000");
+
+        const res = await api.get(
+          "/inventory/products/?is_active=&page_size=1000",
+        );
+
+        console.log("Response status:", res.status);
+        console.log("Response data:", res.data);
+
+        const data = res.data.results || res.data;
+        console.log("Products loaded:", data.length);
+        console.log("First 5 products:", data.slice(0, 5));
+
+        setProducts(data);
+      } catch (err: any) {
         console.error("Error cargando productos:", err);
+        console.error("Error response:", err.response?.data);
       }
     };
     fetchProducts();
@@ -75,12 +88,17 @@ const RecipeManager = () => {
     (p) => p.product_type === "FINISHED" || p.product_type === "INTERMEDIATE",
   );
 
+  // Debug: ver todos los tipos disponibles
+  const productTypes = [...new Set(products.map((p) => p.product_type))];
+  console.log("Tipos de productos en BD:", productTypes);
+
   // Filtramos los productos que pueden USARSE como ingredientes (Hijos)
   const ingredients = products.filter(
     (p) =>
       p.product_type === "STOCKED" ||
       p.product_type === "CONSUMABLE" ||
-      p.product_type === "INTERMEDIATE",
+      p.product_type === "INTERMEDIATE" ||
+      p.product_type === "FINISHED",
   );
 
   // 3. Agregar un ingrediente a la receta
@@ -224,8 +242,8 @@ const RecipeManager = () => {
                   <div className="flex gap-2">
                     <input
                       type="number"
-                      step="0.001"
-                      min="0.001"
+                      step="0.0001"
+                      min="0.0001"
                       className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg outline-none text-sm"
                       placeholder="Ej: 0.150"
                       value={newQuantity}

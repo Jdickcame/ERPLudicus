@@ -45,7 +45,9 @@ urlpatterns = [
     path("api/purchases/", include("purchases.urls")),  # Ruta de Compras
     path("api/reports/", include("reports.urls")),  # Ruta reportes
     path("api/branches/", include("branches.urls")),  # Ruta sedes
+    path("api/company/", include("company.urls")),  # Ruta empresa
     path("api/treasury/", include("treasury.urls")),
+    path("api/events/", include("events.urls")),
     path("api/", include(router.urls)),
 ]
 

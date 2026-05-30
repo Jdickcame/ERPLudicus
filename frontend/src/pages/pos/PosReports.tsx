@@ -1,16 +1,22 @@
+import { Capacitor } from "@capacitor/core";
 import {
   Clock,
   DollarSign,
   Gift,
   Lock,
   Printer,
+  Tag,
   TrendingUp,
+  WifiOff,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import api from "../../api/axios";
+import PinPad from "../../components/common/PinPad";
 import { useAuth } from "../../context/AuthContext";
 import { useBranch } from "../../context/BranchContext";
+import { db } from "../../db/database";
+import { BluetoothPrinter } from "../../utils/BluetoothPrinter";
 import PosHeader from "./components/PosHeader";
 
 interface SaleDetail {
@@ -21,7 +27,7 @@ interface SaleDetail {
 }
 
 interface Sale {
-  id: number;
+  id: number | string;
   series: string;
   number: string;
   total: string;
@@ -31,8 +37,8 @@ interface Sale {
   is_courtesy?: boolean;
   credit_notes?: any[];
   details?: SaleDetail[];
-  // Si tu backend devuelve quién autorizó (user_name o supervisor_name), lo puedes usar
   authorized_by?: { first_name: string; last_name: string } | string;
+  discount_amount?: number | string;
 }
 
 const PosReports = () => {
@@ -40,8 +46,9 @@ const PosReports = () => {
   const { user } = useAuth();
 
   const [sales, setSales] = useState<Sale[]>([]);
-  const [courtesies, setCourtesies] = useState<Sale[]>([]); // 👈 NUEVO: Estado para cortesías
+  const [courtesies, setCourtesies] = useState<Sale[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isOfflineMode, setIsOfflineMode] = useState(!navigator.onLine);
 
   const [shiftOpenedAt, setShiftOpenedAt] = useState<string>("");
   const [currentShiftId, setCurrentShiftId] = useState<number | null>(null); // 👈 NUEVO: GUARDAMOS EL ID DEL TURNO
@@ -86,22 +93,20 @@ const PosReports = () => {
     const validSales: Sale[] = [];
     const courtesySales: Sale[] = [];
 
-        results.forEach((sale: Sale) => {
-          const saleDate = new Date(sale.date);
-          const isAnulada =
-            sale.status === "CANCELED" ||
-            (sale.credit_notes && sale.credit_notes.length > 0);
+    uniqueSales.forEach((sale: Sale) => {
+      const saleDate = new Date(sale.date);
+      const isAnulada =
+        sale.status === "CANCELED" ||
+        (sale.credit_notes && sale.credit_notes.length > 0);
 
-          // Si es del turno actual y NO está anulada
-          if (saleDate >= shiftOpenDate && !isAnulada) {
-            // 👈 NUEVO: Separamos las ventas reales de las cortesías
-            if (sale.invoice_type_code === "99" || sale.is_courtesy) {
-              courtesySales.push(sale);
-            } else {
-              validSales.push(sale);
-            }
-          }
-        });
+      if (saleDate >= shiftOpenDate && !isAnulada) {
+        if (sale.invoice_type_code === "99" || sale.is_courtesy) {
+          courtesySales.push(sale);
+        } else {
+          validSales.push(sale);
+        }
+      }
+    });
 
     setSales(validSales);
     setCourtesies(courtesySales);
@@ -229,8 +234,39 @@ const PosReports = () => {
     }
   };
 
+  useEffect(() => {
     fetchShiftData();
-  }, [currentBranch, isManager]);
+    const interval = setInterval(fetchShiftData, 15000);
+    return () => clearInterval(interval);
+  }, [currentBranch, isUnlocked]);
+
+  const handleUnlockWithPin = async () => {
+    if (authPin.length < 4) return setPinError("El PIN es muy corto.");
+    setPinError("");
+    setLoading(true);
+
+    try {
+      const allUsers = await db.users.toArray();
+      const userFound = allUsers.find(
+        (u) =>
+          String(u.pin) === String(authPin) &&
+          (u.role === "ADMIN" || u.role === "MANAGER"),
+      );
+
+      if (userFound) {
+        setIsUnlocked(true);
+        setAuthPin("");
+      } else {
+        setPinError("❌ PIN incorrecto o sin permisos de gerencia.");
+        setAuthPin("");
+      }
+    } catch (error) {
+      setPinError("❌ Error validando el PIN localmente.");
+      setAuthPin("");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const totalGross = sales.reduce(
     (acc, sale) => acc + parseFloat(sale.total),
@@ -238,13 +274,13 @@ const PosReports = () => {
   );
   const totalNet = totalGross / 1.18;
   const totalTaxes = totalGross - totalNet;
+  const totalDiscounts = sales.reduce(
+    (acc, sale) => acc + Number(sale.discount_amount || 0),
+    0,
+  );
 
-  // --- CÁLCULOS MATEMÁTICOS (Cortesías) ---
-  // Calculamos el costo "regalado" sumando los precios base de los detalles
   const totalCourtesyCost = courtesies.reduce((acc, sale) => {
     if (parseFloat(sale.total) > 0) return acc + parseFloat(sale.total);
-
-    // Si el total es 0 (como debe ser en cortesías), sumamos el valor de sus items
     const itemsTotal =
       sale.details?.reduce(
         (sum, item) => sum + parseFloat(item.price) * Number(item.quantity),
@@ -253,12 +289,10 @@ const PosReports = () => {
     return acc + itemsTotal;
   }, 0);
 
-  // Agrupar por hora (Solo ventas reales)
   const salesByHour = sales.reduce((acc: any, sale) => {
     const hour = new Date(sale.date).getHours();
     const hourStr = hour.toString().padStart(2, "0");
     const timeLabel = `${hourStr}:00 - ${hourStr}:59`;
-
     const gross = parseFloat(sale.total);
     const net = gross / 1.18;
 
@@ -267,7 +301,6 @@ const PosReports = () => {
     acc[timeLabel].count += 1;
     acc[timeLabel].totalGross += gross;
     acc[timeLabel].totalNet += net;
-
     return acc;
   }, {});
 
@@ -275,18 +308,14 @@ const PosReports = () => {
     .map(([time, data]: any) => ({ time, ...data }))
     .sort((a, b) => a.time.localeCompare(b.time));
 
-  // --- CÁLCULO DEL PRODUCT MIX (PMIX - Incluye Cortesías para cuadrar Kardex) ---
   const allTransactions = [...sales, ...courtesies];
   const productMix = allTransactions.reduce((acc: any, sale: any) => {
     if (sale.details && Array.isArray(sale.details)) {
       sale.details.forEach((detail: any) => {
         const productName =
           detail.product?.name || detail.product_name || "Producto Desconocido";
-        const qty = parseFloat(detail.quantity);
-
-        if (!acc[productName]) {
-          acc[productName] = { qty: 0 };
-        }
+        const qty = parseFloat(detail.quantity as string);
+        if (!acc[productName]) acc[productName] = { qty: 0 };
         acc[productName].qty += qty;
       });
     }
@@ -392,44 +421,66 @@ const PosReports = () => {
           new Blob([response.data], { type: "application/pdf" }),
         );
 
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = pdfUrl;
-      document.body.appendChild(iframe);
-
-      iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      };
-
-      setTimeout(() => {
-        document.body.removeChild(iframe);
-        window.URL.revokeObjectURL(pdfUrl);
-      }, 60000);
-    } catch (error) {
-      alert(
-        "❌ Error al intentar generar el ticket. Revisa tu conexión o sesión.",
-      );
+        const iframe = document.createElement("iframe");
+        iframe.style.display = "none";
+        iframe.src = pdfUrl;
+        document.body.appendChild(iframe);
+        iframe.onload = () => {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+          toast.dismiss();
+        };
+        setTimeout(() => {
+          document.body.removeChild(iframe);
+          window.URL.revokeObjectURL(pdfUrl);
+        }, 60000);
+      } catch (error) {
+        toast.dismiss();
+        toast.error("Error al descargar el reporte del servidor.");
+      }
     }
   };
 
-  if (!isManager) {
+  if (!isUnlocked) {
     return (
-      <div className="h-screen flex flex-col bg-slate-100">
+      <div className="h-screen flex flex-col bg-slate-100 font-sans">
         <PosHeader />
-        <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
-          <Lock size={64} className="mb-4 text-slate-300" />
-          <h2 className="text-2xl font-black text-slate-700">
-            Acceso Denegado
-          </h2>
-          <p>No tienes privilegios para ver los reportes de caja.</p>
+        <div className="flex-1 flex flex-col items-center justify-center p-6">
+          <div className="bg-white p-8 rounded-3xl shadow-xl w-full max-w-sm text-center border border-slate-200">
+            <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Lock size={32} className="text-red-500" />
+            </div>
+            {pinError && (
+              <div className="mb-4 p-2 bg-red-100 text-red-600 text-xs font-bold rounded-lg animate-pulse">
+                {pinError}
+              </div>
+            )}
+            <PinPad
+              pin={authPin}
+              setPin={(val) => {
+                setAuthPin(val);
+                setPinError("");
+              }}
+              onSubmit={handleUnlockWithPin}
+              maxLength={6}
+              title="Reportes Bloqueados"
+              subtitle="Solo un Administrador puede ver las métricas de caja. Ingresa el PIN."
+            />
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-slate-100 overflow-hidden font-sans">
+    <div className="h-screen flex flex-col bg-slate-100 overflow-hidden font-sans relative">
+      {isOfflineMode && (
+        <div className="absolute top-0 left-0 w-full bg-red-500 text-white text-xs font-bold py-1 flex justify-center items-center gap-2 z-50">
+          <WifiOff size={14} /> Estás trabajando sin conexión a internet.
+          Mostrando cálculos locales.
+        </div>
+      )}
+
       <PosHeader />
 
       <div
@@ -447,9 +498,9 @@ const PosReports = () => {
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
                 <div className="flex items-center gap-2 text-slate-500 font-bold text-[11px] uppercase tracking-wider mb-2">
                   <DollarSign size={16} className="text-green-600" /> Venta
-                  Bruta
+                  Cobrada
                 </div>
-                <div className="text-3xl font-black text-slate-800 truncate">
+                <div className="text-2xl font-black text-slate-800 truncate">
                   S/ {totalGross.toFixed(2)}
                 </div>
                 <div className="text-[10px] text-slate-400 mt-1">
@@ -461,11 +512,11 @@ const PosReports = () => {
                 <div className="flex items-center gap-2 text-slate-500 font-bold text-[11px] uppercase tracking-wider mb-2">
                   <TrendingUp size={16} className="text-blue-600" /> Venta Neta
                 </div>
-                <div className="text-3xl font-black text-slate-800 truncate">
+                <div className="text-2xl font-black text-slate-800 truncate">
                   S/ {totalNet.toFixed(2)}
                 </div>
                 <div className="text-[10px] text-slate-400 mt-1">
-                  IGV Retenido: S/ {totalTaxes.toFixed(2)}
+                  IGV: S/ {totalTaxes.toFixed(2)}
                 </div>
               </div>
 
@@ -473,29 +524,39 @@ const PosReports = () => {
                 <div className="flex items-center gap-2 text-slate-500 font-bold text-[11px] uppercase tracking-wider mb-2">
                   <Clock size={16} className="text-orange-600" /> Transacciones
                 </div>
-                <div className="text-3xl font-black text-slate-800">
+                <div className="text-2xl font-black text-slate-800">
                   {sales.length}
                 </div>
                 <div className="text-[10px] text-slate-400 mt-1">
-                  Tickets y Facturas cobradas
+                  Boletas y Facturas
                 </div>
               </div>
 
-              {/* 👇 NUEVA TARJETA: CORTESÍAS */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-pink-200 bg-pink-50/30">
+                <div className="flex items-center gap-2 text-pink-700 font-bold text-[11px] uppercase tracking-wider mb-2">
+                  <Tag size={16} className="text-pink-600" /> Dsctos Dados
+                </div>
+                <div className="text-2xl font-black text-pink-800 truncate">
+                  S/ {totalDiscounts.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-pink-500 mt-1">
+                  Dinero descontado
+                </div>
+              </div>
+
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-purple-200 bg-purple-50/30">
                 <div className="flex items-center gap-2 text-purple-700 font-bold text-[11px] uppercase tracking-wider mb-2">
                   <Gift size={16} className="text-purple-600" /> Val. Cortesías
                 </div>
-                <div className="text-3xl font-black text-purple-800 truncate">
+                <div className="text-2xl font-black text-purple-800 truncate">
                   S/ {totalCourtesyCost.toFixed(2)}
                 </div>
                 <div className="text-[10px] text-purple-500 mt-1">
-                  {courtesies.length} tickets regalados / consumo
+                  {courtesies.length} consumos
                 </div>
               </div>
             </div>
 
-            {/* TABLAS - Primera fila */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
@@ -517,7 +578,7 @@ const PosReports = () => {
                       <tr>
                         <th className="p-4 font-bold">Rango de Hora</th>
                         <th className="p-4 font-bold text-center">Tickets</th>
-                        <th className="p-4 font-bold text-right">Bruto</th>
+                        <th className="p-4 font-bold text-right">Cobrado</th>
                         <th className="p-4 font-bold text-right">Neto</th>
                       </tr>
                     </thead>
@@ -533,10 +594,7 @@ const PosReports = () => {
                         </tr>
                       ) : (
                         hourlyData.map((data: any, index) => (
-                          <tr
-                            key={index}
-                            className="hover:bg-slate-50 transition-colors"
-                          >
+                          <tr key={index} className={hoverRow}>
                             <td className="p-4 font-bold text-slate-700 flex items-center gap-2 whitespace-nowrap">
                               <Clock size={14} className="text-slate-400" />{" "}
                               {data.time}
@@ -601,10 +659,7 @@ const PosReports = () => {
                         </tr>
                       ) : (
                         pmixData.map((item: any, index: number) => (
-                          <tr
-                            key={index}
-                            className="hover:bg-slate-50 transition-colors"
-                          >
+                          <tr key={index} className={hoverRow}>
                             <td className="p-4 font-bold text-slate-700">
                               {item.name}
                             </td>
@@ -623,7 +678,6 @@ const PosReports = () => {
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border border-purple-200 overflow-hidden mb-8">
-              {/* CABECERA CON BOTÓN DE IMPRESIÓN */}
               <div className="p-4 border-b border-purple-100 bg-purple-50 flex justify-between items-center">
                 <h3 className="font-bold text-purple-800 flex items-center gap-2">
                   <Gift size={18} /> Detalle de Cortesías y Consumos
@@ -659,12 +713,11 @@ const PosReports = () => {
                           colSpan={4}
                           className="p-8 text-center text-slate-400"
                         >
-                          No se registraron cortesías en este turno.
+                          No se registraron cortesías.
                         </td>
                       </tr>
                     ) : (
                       courtesies.map((sale, index) => {
-                        // Calcular valor de los items de este ticket
                         const itemsCost =
                           sale.details?.reduce(
                             (sum, item) =>
@@ -680,12 +733,8 @@ const PosReports = () => {
                               }`,
                           )
                           .join(", ");
-
                         return (
-                          <tr
-                            key={index}
-                            className="hover:bg-purple-50/30 transition-colors"
-                          >
+                          <tr key={index} className={hoverRowPurple}>
                             <td className="p-4 font-bold text-slate-700 whitespace-nowrap">
                               {sale.series}-{sale.number}
                             </td>

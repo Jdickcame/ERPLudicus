@@ -1,40 +1,40 @@
-import { Lock, Mail } from "lucide-react";
+import { Loader2, Lock, Mail } from "lucide-react"; // 👈 1. Importamos Loader2
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import api from "../api/axios";
-import { useAuth } from "../context/AuthContext"; // 👈 1. IMPORTAR ESTO
+import { useAuth } from "../context/AuthContext";
 
 const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const navigate = useNavigate();
+  const [isLoading, setIsLoading] = useState(false); // 2. Agregamos estado de carga
 
-  // 👇 2. OBTENER LA FUNCIÓN DE LOGIN DEL CONTEXTO
+  const navigate = useNavigate();
+  const location = useLocation();
   const { login } = useAuth();
+
+  const from = location.state?.from?.pathname || "/dashboard";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(""); // Limpiamos errores anteriores
+    setIsLoading(true); // 3. Activamos el modo "Cargando"
+
     try {
-      // Nota: Verifica si tu endpoint es "/users/login/" o "/users/token/"
-      // En SimpleJWT suele ser "/token/", pero úsalo como lo tengas configurado.
       const res = await api.post("/users/login/", { email, password });
 
-      // ❌ BORRAR ESTO (Lo hace el context):
-      // localStorage.setItem("access_token", res.data.access);
-      // localStorage.setItem("refresh_token", res.data.refresh);
-
-      // ✅ USAR ESTO (Actualiza localStorage + Estado de React al mismo tiempo):
       login({
         access: res.data.access,
         refresh: res.data.refresh,
       });
 
-      // Ahora sí, nos vamos al dashboard
-      // React ya sabe que hay usuario, así que no te bloqueará
-      navigate("/dashboard");
+      // Si todo sale bien, navegamos. No necesitamos apagar el isLoading
+      // porque el componente se va a desmontar al cambiar de página.
+      navigate(from, { replace: true });
     } catch (err) {
-      setError("Credenciales inválidas");
+      setError("Credenciales inválidas. Verifica tu correo y contraseña.");
+      setIsLoading(false); // 4. Si hay error, apagamos el cargador para que intente de nuevo
     }
   };
 
@@ -42,12 +42,12 @@ const Login = () => {
     <div className="min-h-screen flex items-center justify-center bg-slate-100">
       <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-slate-800">ERP System</h1>
+          <h1 className="text-3xl font-bold text-slate-800">KENSIS</h1>
           <p className="text-slate-500">Inicia sesión para continuar</p>
         </div>
 
         {error && (
-          <div className="bg-red-100 text-red-700 p-3 rounded mb-4 text-sm text-center">
+          <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg mb-4 text-sm text-center animate-in fade-in zoom-in duration-200">
             {error}
           </div>
         )}
@@ -58,10 +58,13 @@ const Login = () => {
               Email
             </label>
             <div className="relative">
-              <Mail className="absolute left-3 top-3 h-5 w-5 text-slate-400" />
+              <Mail
+                className={`absolute left-3 top-3 h-5 w-5 transition-colors ${isLoading ? "text-slate-300" : "text-slate-400"}`}
+              />
               <input
                 type="email"
-                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+                disabled={isLoading}
+                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition disabled:bg-slate-50 disabled:text-slate-500"
                 placeholder="admin@erp.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -75,10 +78,13 @@ const Login = () => {
               Contraseña
             </label>
             <div className="relative">
-              <Lock className="absolute left-3 top-3 h-5 w-5 text-slate-400" />
+              <Lock
+                className={`absolute left-3 top-3 h-5 w-5 transition-colors ${isLoading ? "text-slate-300" : "text-slate-400"}`}
+              />
               <input
                 type="password"
-                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
+                disabled={isLoading}
+                className="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition disabled:bg-slate-50 disabled:text-slate-500"
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -87,11 +93,24 @@ const Login = () => {
             </div>
           </div>
 
+          {/* 5. EL BOTÓN INTELIGENTE */}
           <button
             type="submit"
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg transition duration-200"
+            disabled={isLoading}
+            className={`w-full flex items-center justify-center gap-2 text-white font-semibold py-2.5 rounded-lg transition-all duration-200 ${
+              isLoading
+                ? "bg-blue-400 cursor-not-allowed shadow-inner"
+                : "bg-blue-600 hover:bg-blue-700 shadow-md hover:shadow-lg active:scale-[0.98]"
+            }`}
           >
-            Ingresar
+            {isLoading ? (
+              <>
+                <Loader2 className="animate-spin" size={20} />
+                <span>Iniciando sesión...</span>
+              </>
+            ) : (
+              <span>Ingresar</span>
+            )}
           </button>
         </form>
       </div>

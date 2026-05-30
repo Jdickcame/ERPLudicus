@@ -53,6 +53,7 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
             "role",
+            "pin",
             "branch",
             "branch_name",
             "password",

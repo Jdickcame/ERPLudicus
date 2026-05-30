@@ -1,3 +1,5 @@
+import { Capacitor } from "@capacitor/core";
+import { useLiveQuery } from "dexie-react-hooks";
 import {
   CheckCircle,
   Clock,
@@ -5,22 +7,38 @@ import {
   Minus,
   Plus,
   Printer,
+  RefreshCw,
   Search,
   ShoppingCart,
+  Tag,
   Trash2,
   UserPlus,
+  WifiOff,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
+import { v4 as uuidv4 } from "uuid";
 import api from "../../api/axios";
 import { useAuth } from "../../context/AuthContext";
 import { useBranch } from "../../context/BranchContext";
+import { db } from "../../db/database";
+import { BluetoothPrinter } from "../../utils/BluetoothPrinter";
+import { numeroALetras } from "../../utils/numeroALetras";
 import PaymentModal from "./components/PaymentModal";
 import PosHeader from "./components/PosHeader";
 
 // --- INTERFACES ---
+interface ProductStock {
+  stock_id: number;
+  is_enabled: boolean;
+  quantity: number;
+  selling_price: number | null;
+  price: number;
+  average_cost: number;
+}
+
 interface Product {
   id: number;
   name: string;
@@ -35,6 +53,7 @@ interface Product {
   is_group?: boolean;
   parent?: number | null;
 }
+
 interface CartItem {
   product: Product;
   quantity: number;
@@ -283,6 +302,8 @@ const PointOfSale = () => {
       const [prodRes, custRes, usersRes, companyRes] = await Promise.all([
         api.get(urlProducts),
         api.get("/sales/customers/"),
+        api.get("/users/users/"),
+        api.get("/company/company/"),
       ]);
 
       const fetchedProducts = prodRes.data.results || prodRes.data;
@@ -327,7 +348,11 @@ const PointOfSale = () => {
       setIsOfflineMode(false);
       if (isManual) toast.success("Catálogo actualizado.");
     } catch (error) {
-      console.error("Error", error);
+      console.error("Error sincronizando catálogo offline:", error);
+      setIsOfflineMode(true);
+      if (isManual) toast.error("Trabajando sin conexión (Catálogo local).");
+    } finally {
+      if (isManual) setIsSyncingCatalog(false);
     }
   };
 
@@ -351,10 +376,7 @@ const PointOfSale = () => {
         }
       }
     };
-
-    if (currentBranch) {
-      verifyCashShift();
-    }
+    if (currentBranch) verifyCashShift();
   }, [currentBranch, navigate]);
 
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
@@ -364,7 +386,25 @@ const PointOfSale = () => {
     return "BOLETA";
   }, [selectedCustomer]);
 
-  // Lógica Carrito
+  const getStockQty = (product: Product) => {
+    if (!product.manage_stock) return 9999;
+    if (typeof product.stock === "object" && product.stock !== null) {
+      return product.stock.quantity;
+    }
+    return typeof product.stock === "number" ? product.stock : 0;
+  };
+
+  const getProductPrice = (product: Product): number => {
+    if (typeof product.stock === "object" && product.stock !== null) {
+      return typeof product.stock.price === "string"
+        ? parseFloat(product.stock.price)
+        : product.stock.price;
+    }
+    return typeof product.price === "string"
+      ? parseFloat(product.price)
+      : product.price;
+  };
+
   const addToCart = (product: Product) => {
     if (product.is_group) {
       setActiveGroupProduct(product);
@@ -506,8 +546,18 @@ const PointOfSale = () => {
 
     const matchesSearch =
       p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.sku.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
+      p.sku.toLowerCase().includes(searchTerm.toLowerCase());
+    if (!matchesSearch) return false;
+
+    const isEnabledInBranch =
+      typeof p.stock === "object" && p.stock !== null
+        ? p.stock.is_enabled !== undefined
+          ? p.stock.is_enabled
+          : true
+        : true;
+
+    return isEnabledInBranch;
+  });
 
   const handleOpenPayment = () => {
     if (cart.length === 0) return toast.error("El carrito está vacío.");
@@ -869,11 +919,12 @@ const PointOfSale = () => {
     }
   };
 
-  // 🔥 LÓGICA DE BÚSQUEDA Y CREACIÓN DE CLIENTE MEJORADA
   const searchCustomer = async (docNumber: string) => {
     if (!docNumber) return;
     setIsLoading(true);
     try {
+      if (isOfflineMode) throw new Error("Offline");
+
       const res = await api.get(
         `/sales/customers/search_doc/?doc=${docNumber}`,
       );
@@ -948,6 +999,7 @@ const PointOfSale = () => {
     }
 
     setIsLoading(true);
+
     try {
       const payload: any = {
         ...newCustomer,
@@ -993,7 +1045,14 @@ const PointOfSale = () => {
   };
 
   return (
-    <div className="h-[calc(100vh)] flex flex-col bg-slate-100 overflow-hidden font-sans">
+    <div className="h-[calc(100vh)] flex flex-col bg-slate-100 overflow-hidden font-sans relative">
+      {isOfflineMode && (
+        <div className="absolute top-0 left-0 w-full bg-red-500 text-white text-xs font-bold py-1 flex justify-center items-center gap-2 z-50">
+          <WifiOff size={14} /> Trabajando sin conexión a internet. Ventas
+          locales activadas.
+        </div>
+      )}
+
       <PosHeader />
 
       {/* --- MODALES --- */}
@@ -1064,7 +1123,6 @@ const PointOfSale = () => {
                   />
                 </div>
               </div>
-
               <div>
                 <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
                   Razón Social / Nombres <span className="text-red-500">*</span>
@@ -1081,7 +1139,6 @@ const PointOfSale = () => {
                   placeholder="Nombre completo..."
                 />
               </div>
-
               <div>
                 <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
                   Dirección (Opcional)
@@ -1097,7 +1154,6 @@ const PointOfSale = () => {
                   placeholder="Dirección..."
                 />
               </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-slate-500 uppercase block mb-1">
@@ -1621,7 +1677,7 @@ const PointOfSale = () => {
                 <div className="relative flex-1">
                   <Search
                     className="absolute left-3 top-2.5 text-slate-400"
-                    size={14}
+                    size={16}
                   />
                   {/* 👇 INPUT TIPO TELÉFONO PARA BÚSQUEDA 👇 */}
                   <input
@@ -1633,13 +1689,16 @@ const PointOfSale = () => {
                       if (e.key === "Enter")
                         searchCustomer((e.target as HTMLInputElement).value);
                     }}
+                    onChange={(e) => {
+                      e.target.value = e.target.value.replace(/[^0-9]/g, "");
+                    }}
                   />
                 </div>
                 <button
                   onClick={() => setIsCustomerModalOpen(true)}
                   className="bg-white border-2 border-slate-200 text-slate-500 p-2 rounded-xl hover:bg-slate-50 hover:text-blue-600 shadow-sm active:scale-95"
                 >
-                  <Plus size={16} strokeWidth={3} />
+                  <UserPlus size={18} />
                 </button>
                 <span className="text-[10px] px-2.5 py-2.5 rounded-xl font-black tracking-widest uppercase shadow-sm bg-blue-100 text-blue-700 border border-blue-200">
                   {previewInvoiceType}
@@ -1648,10 +1707,10 @@ const PointOfSale = () => {
             ) : (
               <div className="bg-blue-50 border border-blue-200 p-3 rounded-xl flex justify-between items-center shadow-sm animate-in fade-in">
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-blue-800 truncate">
+                  <p className="text-xs font-black text-blue-900 truncate tracking-wide">
                     {selectedCustomer?.name}
                   </p>
-                  <p className="text-[10px] text-blue-600 font-mono">
+                  <p className="text-[10px] text-blue-600 font-bold uppercase tracking-widest mt-0.5">
                     {selectedCustomer?.document_type}:{" "}
                     {selectedCustomer?.tax_id}
                   </p>
@@ -1673,8 +1732,7 @@ const PointOfSale = () => {
             )}
           </div>
 
-          {/* LISTA DE PRODUCTOS COMPACTA */}
-          <div className="flex-1 overflow-y-auto bg-white custom-scrollbar">
+          <div className="flex-1 overflow-y-auto bg-slate-50/50 custom-scrollbar">
             {cart.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-400 gap-3">
                 <ShoppingCart size={48} className="opacity-20 mb-1" />
@@ -1683,7 +1741,7 @@ const PointOfSale = () => {
                 </p>
               </div>
             ) : (
-              <ul className="divide-y divide-slate-100">
+              <ul className="divide-y divide-slate-100/80">
                 {cart.map((item, index) => (
                   <li
                     key={index}
@@ -1697,14 +1755,13 @@ const PointOfSale = () => {
                         S/ {(item.quantity * item.price).toFixed(2)}
                       </span>
                     </div>
-
                     <div className="flex justify-between items-center">
-                      <div className="flex items-center bg-white rounded border border-slate-200 shadow-sm overflow-hidden">
+                      <div className="flex items-center bg-slate-100 rounded-lg border border-slate-200 overflow-hidden shadow-sm">
                         <button
                           onClick={() => updateQuantity(index, -1)}
                           className="px-3 py-1.5 bg-white text-slate-600 hover:text-red-600 active:bg-slate-200"
                         >
-                          <Minus size={12} strokeWidth={3} />
+                          <Minus size={14} strokeWidth={3} />
                         </button>
                         <input
                           type="number"
@@ -1745,19 +1802,18 @@ const PointOfSale = () => {
                           onClick={() => updateQuantity(index, 1)}
                           className="px-3 py-1.5 bg-white text-slate-600 hover:text-green-600 active:bg-slate-200"
                         >
-                          <Plus size={12} strokeWidth={3} />
+                          <Plus size={14} strokeWidth={3} />
                         </button>
                       </div>
-
                       <div className="flex items-center gap-3">
-                        <span className="text-[10px] text-slate-400 font-medium bg-slate-100 px-1.5 py-0.5 rounded">
+                        <span className="text-[11px] text-slate-500 font-bold bg-white border border-slate-200 px-2 py-1 rounded-md shadow-sm">
                           S/ {item.price.toFixed(2)} c/u
                         </span>
                         <button
                           onClick={() => removeFromCart(index)}
                           className="text-slate-400 hover:text-red-500 p-1.5 rounded-lg active:scale-95"
                         >
-                          <Trash2 size={14} />
+                          <Trash2 size={16} />
                         </button>
                       </div>
                     </div>
@@ -1817,8 +1873,8 @@ const PointOfSale = () => {
                 disabled={cart.length === 0 || isLoading}
                 className={`w-full py-3.5 px-4 rounded-xl shadow-lg active:scale-[0.98] flex items-center justify-between transition-all ${
                   isLoading || cart.length === 0
-                    ? "bg-slate-200 text-slate-400 cursor-not-allowed"
-                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-md shadow-blue-200"
+                    ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
+                    : "bg-slate-900 text-white hover:bg-black hover:shadow-xl"
                 }`}
               >
                 <div className="flex items-center gap-2">

@@ -1,8 +1,6 @@
 import {
   ArrowDown,
   ArrowUp,
-  ChevronLeft,
-  ChevronRight,
   Edit,
   Loader2,
   Plus,
@@ -13,6 +11,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import api from "../../api/axios";
+import Pagination from "../../components/common/Pagination";
 
 // Hook simple para "Debounce"
 function useDebounce(value: string, delay: number) {
@@ -35,7 +34,7 @@ const Suppliers = () => {
   const debouncedSearch = useDebounce(searchTerm, 500);
 
   const [page, setPage] = useState(1);
-  const pageSize = 20;
+  const [pageSize, setPageSize] = useState(20);
   const [ordering, setOrdering] = useState("-id");
 
   // Estados Modal Proveedor
@@ -256,27 +255,18 @@ const Suppliers = () => {
       </div>
 
       {/* PAGINACIÓN */}
-      <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-        <div className="text-sm text-slate-500">
-          Página <b>{page}</b> de <b>{totalPages || 1}</b>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setPage((p) => Math.max(p - 1, 1))}
-            disabled={page === 1 || loading}
-            className="p-2 border rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
-          >
-            <ChevronLeft size={18} />
-          </button>
-          <button
-            onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
-            disabled={page === totalPages || totalPages === 0 || loading}
-            className="p-2 border rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
-          >
-            <ChevronRight size={18} />
-          </button>
-        </div>
-      </div>
+      <Pagination
+        currentPage={page}
+        totalPages={totalPages}
+        totalCount={totalCount}
+        pageSize={pageSize}
+        loading={loading}
+        onPageChange={(newPage) => setPage(newPage)}
+        onPageSizeChange={(newSize) => {
+          setPageSize(newSize);
+          setPage(1);
+        }}
+      />
 
       {/* MODAL EDICIÓN PROVEEDOR */}
       {isModalOpen && (

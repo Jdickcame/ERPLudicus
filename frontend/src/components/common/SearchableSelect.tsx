@@ -127,10 +127,10 @@ const SearchableSelect = ({
             <button
               onClick={handleClear}
               type="button"
-              className="p-1 rounded-full text-slate-400 hover:bg-red-50 hover:text-red-500 transition z-10"
-              title="Limpiar selección"
+              className="p-1.5 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 hover:border border-red-300 transition z-10"
+              title="Limpiar y buscar otro"
             >
-              <X size={14} />
+              <X size={16} />
             </button>
           )}
 

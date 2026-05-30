@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   Banknote,
+  BarChart3,
   ChefHat,
   ChevronDown,
   ChevronRight,
@@ -18,9 +19,11 @@ import {
   ShoppingBag,
   ShoppingCart,
   Target,
+  Ticket,
   Truck,
   Users,
   Wallet,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -28,7 +31,6 @@ import { useAuth } from "../../context/AuthContext";
 import ExchangeRateWidget from "../common/ExchangeRateWidget";
 
 // --- SUB-COMPONENTES ---
-
 const SidebarItem = ({ to, icon: Icon, label, exact = false }: any) => {
   const location = useLocation();
   const isActive = exact
@@ -52,10 +54,7 @@ const SidebarItem = ({ to, icon: Icon, label, exact = false }: any) => {
 
 const SidebarGroup = ({ label, icon: Icon, children, basePath }: any) => {
   const location = useLocation();
-
-  // Ya no necesitamos Array, volvimos a la simplicidad
   const isActiveGroup = location.pathname.startsWith(basePath);
-
   const [isOpen, setIsOpen] = useState(isActiveGroup);
 
   useEffect(() => {
@@ -117,17 +116,12 @@ const Sidebar = ({
 
   const showSalesGroup =
     check("sales", "pos") || check("sales", "list") || check("cash");
-
   const showInventoryGroup =
     check("inventory", "list") || check("inventory", "create");
-
-  // 1. Logística y Compras (Ya no incluye finanzas)
   const showPurchasesGroup =
     check("purchases", "create") ||
     check("purchases", "list") ||
     check("purchases", "suppliers");
-
-  // 2. Tesorería
   const showTreasuryGroup =
     check("purchases", "payable") || check("purchases", "budgets");
   const showEventsGroup =
@@ -144,17 +138,20 @@ const Sidebar = ({
       }`}
     >
       {/* Cabecera */}
-      <div className="p-6 border-b border-slate-800 bg-slate-900">
-        <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 tracking-tight">
-          KENSIS System
-        </h2>
-        <div className="mt-2 text-xs text-slate-500">
-          <p className="font-bold text-slate-400 truncate">{user?.email}</p>
-          <span className="uppercase bg-slate-800 px-2 py-0.5 rounded text-[10px] tracking-wider text-blue-400">
-            {user?.role}
-          </span>
+      <div className="p-6 border-b border-slate-800 bg-slate-900 flex justify-between items-start">
+        <div>
+          <h2 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-blue-600 tracking-tight">
+            KENSIS
+          </h2>
+          <div className="mt-2 text-xs text-slate-500">
+            <p className="font-bold text-slate-400 truncate max-w-[150px]">
+              {user?.email}
+            </p>
+            <span className="uppercase bg-slate-800 px-2 py-0.5 rounded text-[10px] tracking-wider text-blue-400 mt-1 inline-block">
+              {user?.role}
+            </span>
+          </div>
         </div>
-      </div>
 
         {/* Botón cerrar (Solo visible en móvil) */}
         <button
@@ -187,8 +184,13 @@ const Sidebar = ({
 
         {showSalesGroup && (
           <SidebarGroup label="Ventas" icon={ShoppingCart} basePath="/sales">
-            {check("sales", "pos") && (
-              <SidebarItem to="/pos" icon={CreditCard} label="Punto de Venta" />
+            {check("sales", "list") && (
+              <SidebarItem
+                to="/sales/new"
+                icon={PlusCircle}
+                label="Nueva Venta"
+                exact={true}
+              />
             )}
             {check("sales", "list") && (
               <SidebarItem
@@ -212,6 +214,21 @@ const Sidebar = ({
                 />
               </>
             )}
+          </SidebarGroup>
+        )}
+
+        {showEventsGroup && (
+          <SidebarGroup
+            label="Eventos & Taquilla"
+            icon={Ticket}
+            basePath="/events"
+          >
+            <SidebarItem
+              to="/events"
+              icon={ClipboardList}
+              label="Control de Puerta"
+              exact={true}
+            />
           </SidebarGroup>
         )}
 
@@ -276,6 +293,13 @@ const Sidebar = ({
             )}
             {check("inventory", "list") && (
               <SidebarItem
+                to="/inventory/audit"
+                icon={ClipboardList}
+                label="Auditoría Física"
+              />
+            )}
+            {check("inventory", "list") && (
+              <SidebarItem
                 to="/inventory/products"
                 icon={LayoutList}
                 label="Catálogo General"
@@ -328,21 +352,17 @@ const Sidebar = ({
         </div>
 
         {showTreasuryGroup && (
-          <SidebarGroup
-            label="Tesorería"
-            icon={Wallet}
-            basePath="/treasury" // 👈 Solo necesita esta base
-          >
+          <SidebarGroup label="Tesorería" icon={Wallet} basePath="/treasury">
             {check("purchases", "payable") && (
               <SidebarItem
-                to="/treasury/payables" // 👈 RUTA CORRECTA
+                to="/treasury/payables"
                 icon={AlertCircle}
                 label="Cuentas por Pagar"
               />
             )}
             {check("purchases", "budgets") && (
               <SidebarItem
-                to="/treasury/budgets" // 👈 RUTA CORRECTA
+                to="/treasury/budgets"
                 icon={Target}
                 label="Presupuestos"
               />
@@ -356,7 +376,7 @@ const Sidebar = ({
       {/* Footer */}
       <div className="p-4 border-t border-slate-800 bg-slate-900">
         <button
-          onClick={logout}
+          onClick={() => logout("/login")}
           className="flex items-center justify-center space-x-2 text-slate-400 hover:text-white hover:bg-red-600/90 w-full p-2.5 rounded-lg transition-all duration-200"
         >
           <LogOut size={18} />

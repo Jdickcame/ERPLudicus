@@ -5,6 +5,7 @@ from decimal import Decimal
 import openpyxl
 import requests
 from core.mixins import BranchAccessMixin
+from core.pagination import StandardResultsSetPagination
 from django.conf import settings
 from django.db import transaction
 from django.db.models import (
@@ -33,7 +34,7 @@ from reportlab.platypus import (
 )
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from treasury.models import PaymentTransaction
@@ -46,6 +47,7 @@ from .models import (
     PurchaseOrder,
     PurchaseOrderDetail,
     Supplier,
+    SupplierProductPrice,
 )
 from .serializers import (
     ExpenseCategorySerializer,
@@ -54,12 +56,6 @@ from .serializers import (
     PurchaseSerializer,
     SupplierSerializer,
 )
-
-
-class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 10
-    page_size_query_param = "page_size"
-    max_page_size = 100
 
 
 # --- 3. OTRAS VISTAS ---
@@ -500,6 +496,12 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
             .all()
             .order_by("-issue_date")
         )
+        year = self.request.query_params.get("year")
+        month = self.request.query_params.get("month")
+        if year:
+            queryset = queryset.filter(issue_date__year=year)
+        if month:
+            queryset = queryset.filter(issue_date__month=month)
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             queryset = queryset.filter(branch_id=branch_id)
@@ -629,6 +631,16 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 stock_record.average_cost = new_average_cost
                 stock_record.save()
 
+                # Registrar precio por proveedor
+                SupplierProductPrice.objects.update_or_create(
+                    supplier=purchase.supplier,
+                    product=detail.product,
+                    defaults={
+                        "unit_price": real_unit_cost,
+                        "last_purchase_date": purchase.issue_date,
+                    },
+                )
+
                 Kardex.objects.create(
                     branch=purchase.branch,
                     product=detail.product,
@@ -710,17 +722,26 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
         with transaction.atomic():
             old_purchase = self.get_object()
 
-            # 1. Revertimos la compra vieja (Multiplicando por su factor)
+            # 1. Revertimos la compra vieja (usando los valores ORIGINALES guardados)
             for detail in old_purchase.details.all():
                 if detail.product and detail.product.product_type in [
                     "STOCKED",
                     "CONSUMABLE",
                 ]:
                     try:
+                        # Usamos el valor ORIGINAL que se guardó en la compra
                         real_old_qty = detail.quantity * detail.units_per_package
                         stk = Stock.objects.get(
                             branch=old_purchase.branch, product=detail.product
                         )
+
+                        # Validar que no quede stock negativo
+                        if stk.quantity < real_old_qty:
+                            raise ValidationError(
+                                f"No se puede editar: stock insuficiente para {detail.product.name}. "
+                                f"Stock actual: {stk.quantity}, revertiría: {real_old_qty}"
+                            )
+
                         stk.quantity -= real_old_qty
                         stk.save()
                     except Stock.DoesNotExist:
@@ -730,10 +751,10 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                 old_purchase.supplier.balance -= old_purchase.total_net_pay
                 old_purchase.supplier.save()
 
-            # 2. Guardamos la nueva compra
+            # 2. Guardamos la nueva compra (los detalles ya tienen los nuevos valores)
             new_purchase = serializer.save()
 
-            # 3. Ingresamos los nuevos detalles (Multiplicando por el nuevo factor)
+            # 3. Ingresamos los nuevos detalles
             for detail in new_purchase.details.all():
                 if detail.product and detail.product.product_type in [
                     "STOCKED",
@@ -779,7 +800,7 @@ class PurchaseViewSet(BranchAccessMixin, viewsets.ModelViewSet):
                         balance_total_cost=stock_record.quantity
                         * stock_record.average_cost,
                         user=self.request.user,
-                        description=f"Edición Compra {new_purchase.series}-{new_purchase.number} | {detail.quantity} {detail.invoice_unit}(s)",
+                        description=f"Edición Compra {new_purchase.series}-{new_purchase.number} | {detail.quantity} {detail.invoice_unit}(s) x {detail.units_per_package}",
                     )
 
             if new_purchase.payment_status == "PENDING" and new_purchase.supplier:
@@ -900,9 +921,17 @@ class PurchaseNoteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return PurchaseNote.objects.select_related(
-            "purchase", "purchase__supplier"
-        ).all()
+        queryset = super().get_queryset()
+
+        year = self.request.query_params.get("year")
+        month = self.request.query_params.get("month")
+
+        if year:
+            queryset = queryset.filter(issue_date__year=year)
+        if month:
+            queryset = queryset.filter(issue_date__month=month)
+
+        return queryset
 
     def perform_create(self, serializer):
         with transaction.atomic():

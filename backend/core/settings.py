@@ -103,10 +103,9 @@ INSTALLED_APPS = [
     "sales",
     "purchases",
     "reports",
-    "branches",
     "core",
-    "cash",
     "treasury",
+    "events",
 ]
 
 AUTH_USER_MODEL = "users.User"
@@ -161,8 +160,8 @@ DATABASES = {
         "POOL_OPTIONS": {
             "POOL_SIZE": 10,
             "MAX_OVERFLOW": 10,
-            "RECYCLE": 30,  # Banahosting mata conexiones rápido, las reciclamos cada 30 seg
-            "PRE_PING": True,  # Verifica si la conexión está viva antes de usarla
+            "RECYCLE": 30,          # Banahosting mata conexiones rápido, las reciclamos cada 30 seg
+            "PRE_PING": True,       # Verifica si la conexión está viva antes de usarla
         },
     }
 }
@@ -176,22 +175,9 @@ FACTILIZA_TOKEN = env("FACTILIZA_TOKEN", default="")
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "core.pagination.StandardResultsSetPagination",
-    )
+    ),
+    "DEFAULT_PAGINATION_CLASS": "core.pagination.StandardResultsSetPagination",
 }
-
-# CORS PARA PRODUCCION
-# CORS_ALLOWED_ORIGINS = [
-#     "https://app-erp.ludicuspark.com",  # 👈 Agregado https://
-#     "https://www.app-erp.ludicuspark.com",  # 👈 Agregado https://
-#     "http://localhost:5173",  # Localhost suele ser http
-# ]
-
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Puerto por defecto de Vite
-    "http://localhost:3000",
-]
 
 
 # Password validation
@@ -237,9 +223,13 @@ USE_TZ = False
 
 STATIC_URL = "static/"
 
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, "static"),
+]
+
 # PRODUCCION
-# STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
-# STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 
 # Media files (Archivos físicos generados por el sistema: XML, ZIP, PDFs)

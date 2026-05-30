@@ -10,7 +10,6 @@ class ExchangeRateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ExchangeRate
-        # 👇 AGREGAMOS "date" PARA QUE EL FORMULARIO FUNCIONE
         fields = [
             "id",
             "date",

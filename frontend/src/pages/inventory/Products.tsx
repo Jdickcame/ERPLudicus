@@ -1,4 +1,6 @@
 import {
+  ArrowDown,
+  ArrowUp,
   Box,
   ChefHat,
   Download, // 👈 Importamos el ícono de descarga
@@ -8,6 +10,8 @@ import {
   Package,
   Plus,
   Search,
+  ToggleLeft,
+  ToggleRight,
   Trash2,
   Wrench,
 } from "lucide-react";
@@ -57,7 +61,7 @@ const Products = () => {
       const params: any = {
         page: page,
         page_size: pageSize,
-        ordering: "-id",
+        ordering: ordering,
       };
 
       if (debouncedSearch) {
@@ -84,7 +88,7 @@ const Products = () => {
     } finally {
       setLoading(false);
     }
-  }, [page, debouncedSearch]);
+  }, [page, debouncedSearch, ordering, currentBranch]);
 
   useEffect(() => {
     loadProducts();
@@ -149,7 +153,7 @@ const Products = () => {
   const handleDelete = async (id: number, name: string) => {
     if (
       !window.confirm(
-        `¿Estás seguro de inhabilitar el producto "${name}"? No se borrará del historial.`,
+        `¿Estás seguro de inhabilitar globalmente el producto "${name}"?`,
       )
     )
       return;
@@ -228,7 +232,7 @@ const Products = () => {
             <Box size={12} /> Insumo
           </span>
         );
-      case "INTERMEDIATE": // 👇 NUEVO: El badge para Subrecetas / Masa
+      case "INTERMEDIATE":
         return (
           <span className="bg-cyan-50 text-cyan-600 border border-cyan-200 px-2 py-1 rounded text-[10px] font-bold flex items-center gap-1 w-fit">
             <Link size={12} /> Subreceta
@@ -267,7 +271,9 @@ const Products = () => {
             <BranchSelector />
           </div>
           <p className="text-slate-500 text-sm mt-1">
-            Gestión global de items, insumos y recetas ({totalCount} registros)
+            {currentBranch
+              ? `Configurando el menú y precios para la sede: ${currentBranch.name}`
+              : `Gestión global de items, insumos y recetas (${totalCount} registros)`}
           </p>
         </div>
 
@@ -317,9 +323,18 @@ const Products = () => {
           <table className="w-full text-sm text-left">
             <thead className="bg-slate-50 uppercase text-[10px] tracking-wider text-slate-500 font-bold border-b select-none">
               <tr>
-                <th className="p-4">SKU / Código</th>
-                <th className="p-4">Producto</th>
-                <th className="p-4">Clasificación</th>
+                <th
+                  className="p-4 cursor-pointer hover:bg-slate-100"
+                  onClick={() => handleSort("sku")}
+                >
+                  SKU / Código {getSortIcon("sku")}
+                </th>
+                <th
+                  className="p-4 cursor-pointer hover:bg-slate-100"
+                  onClick={() => handleSort("name")}
+                >
+                  Producto {getSortIcon("name")}
+                </th>
                 <th className="p-4">Tipo</th>
 
                 {currentBranch ? (

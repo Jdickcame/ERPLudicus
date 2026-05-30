@@ -8,8 +8,9 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import api from "../../api/axios";
+import { useBranch } from "../../context/BranchContext";
 
 interface Category {
   id: number;
@@ -28,10 +29,13 @@ interface Choice {
 
 const ProductForm = () => {
   const navigate = useNavigate();
+  const { id } = useParams<{ id: string }>();
+  const isEditing = Boolean(id);
+  const { currentBranch } = useBranch();
+
   const [categories, setCategories] = useState<Category[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
 
-  // 👇 Nuevos estados para los datos dinámicos
   const [productTypes, setProductTypes] = useState<Choice[]>([]);
   const [uomChoices, setUomChoices] = useState<Choice[]>([]);
 
@@ -42,14 +46,16 @@ const ProductForm = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const [sellingPrice, setSellingPrice] = useState<string>("");
+
   const [formData, setFormData] = useState({
     name: "",
     sku: "",
     area: "",
     category: "",
     price: "",
-    product_type: "STOCKED", // Default
-    unit_of_measure: "NIU", // Default
+    product_type: "STOCKED",
+    unit_of_measure: "NIU",
     is_sellable: true,
     is_purchasable: true,
     manage_stock: true,
@@ -69,7 +75,6 @@ const ProductForm = () => {
     api
       .get("/purchases/purchases/choices/")
       .then((res) => {
-        // Tu endpoint 'choices' devuelve {value, label}, lo mapeamos a {id, name}
         const areasFormateadas = res.data.areas.map((a: any) => ({
           id: a.value,
           name: a.label,
@@ -78,7 +83,7 @@ const ProductForm = () => {
       })
       .catch((err) => console.error("Error áreas:", err));
 
-    // 👇 NUEVO: Cargar Opciones Dinámicas (Tipos y Unidades)
+    // Cargar Opciones Dinámicas (Tipos y Unidades)
     api
       .get("/inventory/products/choices/")
       .then((res) => {
@@ -145,32 +150,27 @@ const ProductForm = () => {
     setFormData((prev) => {
       const updated = { ...prev, [name]: newValue };
 
-      // Lógica automática de UX según el Tipo de Producto
       if (name === "product_type") {
         if (value === "SERVICE") {
           updated.manage_stock = false;
-          updated.unit_of_measure = "ZZ"; // Mutuamente Exclusivo
+          updated.unit_of_measure = "ZZ";
           updated.is_sellable = true;
           updated.is_purchasable = true;
         } else if (value === "FINISHED") {
-          // Producto Final (Ej: Pizza)
           updated.is_purchasable = false;
           updated.manage_stock = true;
           updated.is_sellable = true;
         } else if (value === "INTERMEDIATE") {
-          // 👇 NUEVO: Producto Intermedio (Ej: Masa)
-          updated.is_purchasable = false; // Se fabrica, no se compra
-          updated.is_sellable = false; // Se usa, no se vende directo
-          updated.manage_stock = true; // SÍ se guarda en la refri
-          updated.price = "0"; // No tiene precio de carta
+          updated.is_purchasable = false;
+          updated.is_sellable = false;
+          updated.manage_stock = true;
+          updated.price = "0.00";
         } else if (value === "CONSUMABLE") {
-          // Materia Prima (Ej: Harina)
           updated.manage_stock = true;
           updated.is_purchasable = true;
-          updated.is_sellable = false; // Insumos no se venden
-          updated.price = "0";
+          updated.is_sellable = false;
+          updated.price = "0.00";
         } else {
-          // Mercadería (Ej: Gaseosas)
           updated.manage_stock = true;
           updated.is_purchasable = true;
           updated.is_sellable = true;
@@ -194,7 +194,7 @@ const ProductForm = () => {
     setError("");
 
     try {
-      const payload = {
+      const payload: any = {
         ...formData,
         category: parseInt(formData.category),
         area: formData.area ? parseInt(formData.area) : null,
@@ -223,7 +223,6 @@ const ProductForm = () => {
       if (err.response?.data?.sku) {
         setError("El código SKU ya existe.");
       } else {
-        // Mejoramos el manejo de errores para ver qué falló exactamente
         setError(
           JSON.stringify(err.response?.data) || "Error al guardar el producto.",
         );
@@ -238,10 +237,13 @@ const ProductForm = () => {
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            <Box className="text-blue-600" /> Nuevo Producto
+            <Box className="text-blue-600" />{" "}
+            {isEditing ? "Editar Producto" : "Nuevo Producto"}
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Registra un ítem en el catálogo maestro.
+            {isEditing
+              ? "Modifica los datos del producto."
+              : "Registra un ítem en el catálogo maestro."}
           </p>
         </div>
         <button
@@ -345,10 +347,9 @@ const ProductForm = () => {
                   )}
                 </label>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   name="price"
-                  step="0.01"
-                  min="0"
                   required={formData.is_sellable}
                   disabled={!formData.is_sellable}
                   className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition disabled:opacity-60 disabled:bg-slate-100 disabled:cursor-not-allowed font-medium"
@@ -494,7 +495,7 @@ const ProductForm = () => {
                 </select>
               </div>
 
-              {/* 👇 SELECT DINÁMICO DE TIPOS 👇 */}
+              {/* SELECT DINÁMICO DE TIPOS */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Tipo de Producto <span className="text-red-500">*</span>
@@ -514,7 +515,7 @@ const ProductForm = () => {
                 </select>
               </div>
 
-              {/* 👇 SELECT DINÁMICO DE UNIDADES DE MEDIDA 👇 */}
+              {/* SELECT DINÁMICO DE UNIDADES DE MEDIDA */}
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Unidad de Medida <span className="text-red-500">*</span>
@@ -549,7 +550,10 @@ const ProductForm = () => {
                   name="is_sellable"
                   checked={formData.is_sellable}
                   onChange={handleChange}
-                  disabled={formData.product_type === "CONSUMABLE"}
+                  disabled={
+                    formData.product_type === "CONSUMABLE" ||
+                    formData.product_type === "INTERMEDIATE"
+                  }
                   className="w-5 h-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500 disabled:opacity-50"
                 />
                 <span
@@ -570,7 +574,10 @@ const ProductForm = () => {
                   name="is_purchasable"
                   checked={formData.is_purchasable}
                   onChange={handleChange}
-                  disabled={formData.product_type === "FINISHED"}
+                  disabled={
+                    formData.product_type === "FINISHED" ||
+                    formData.product_type === "INTERMEDIATE"
+                  }
                   className="w-5 h-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500 disabled:opacity-50"
                 />
                 <span

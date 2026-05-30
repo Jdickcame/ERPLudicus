@@ -1,7 +1,7 @@
 import { jwtDecode } from "jwt-decode";
 import { createContext, useContext, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom"; // 1. IMPORTAMOS NAVIGATE
 
-// Definición de tipos
 interface UserPayload {
   user_id: number;
   email: string;
@@ -9,34 +9,13 @@ interface UserPayload {
   branch_id?: number;
   is_superuser?: boolean;
   exp: number;
-
-  // 👇 ASÍ DEBE LUCIR AHORA PARA COINCIDIR CON TU BACKEND
-  permissions: {
-    users: boolean;
-    cash: boolean;
-    sales: {
-      pos: boolean;
-      list: boolean;
-    };
-    inventory: {
-      list: boolean;
-      create: boolean;
-    };
-    purchases: {
-      create: boolean;
-      list: boolean;
-      payable: boolean;
-      balances: boolean;
-      suppliers: boolean;
-      budgets: boolean;
-    };
-  };
+  permissions: any; // Acortado por espacio, deja el tuyo
 }
 
 interface AuthContextType {
   user: UserPayload | null;
   login: (tokens: { access: string; refresh: string }) => void;
-  logout: () => void;
+  logout: (targetRoute?: string) => Promise<void>; // Le agregamos Promise<void>
   loading: boolean;
   isAuthenticated: boolean;
 }
@@ -46,8 +25,8 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<UserPayload | null>(null);
   const [loading, setLoading] = useState(true);
+  const navigate = useNavigate(); // 3. INICIALIZAMOS NAVIGATE
 
-  // Función auxiliar para decodificar con seguridad
   const safeDecode = (token: string): UserPayload | null => {
     try {
       return jwtDecode<UserPayload>(token);
@@ -57,59 +36,88 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   useEffect(() => {
-    // 1. Al cargar la app, buscamos el token
     const token = localStorage.getItem("access_token");
-
     if (token) {
       const decoded = safeDecode(token);
-
-      // Validamos si existe y si no ha expirado
       if (decoded && decoded.exp * 1000 > Date.now()) {
-        console.log("✅ Sesión restaurada:", decoded.email);
         setUser(decoded);
       } else {
-        console.warn("⚠️ Token expirado o inválido al inicio. Limpiando.");
         localStorage.removeItem("access_token");
         localStorage.removeItem("refresh_token");
         setUser(null);
       }
     }
-
     setLoading(false);
-  }, []);
+
+    // 1. EL ESCUCHADOR DE AXIOS
+    const handleForceLogout = () => {
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("refresh_token");
+
+      // Viajamos primero
+      if (window.location.hash.includes("/pos")) {
+        navigate("/pos-login", { replace: true });
+      } else {
+        navigate("/login", { replace: true });
+      }
+
+      // Borramos al usuario un instante DESPUÉS para ganar la carrera
+      setTimeout(() => {
+        setUser(null);
+      }, 50);
+    };
+
+    window.addEventListener("force_logout", handleForceLogout);
+    return () => window.removeEventListener("force_logout", handleForceLogout);
+  }, [navigate]);
 
   const login = (tokens: { access: string; refresh: string }) => {
     localStorage.setItem("access_token", tokens.access);
     localStorage.setItem("refresh_token", tokens.refresh);
-
-    const decoded = safeDecode(tokens.access);
-    setUser(decoded);
+    setUser(safeDecode(tokens.access));
   };
 
-  const logout = () => {
-    console.log("👋 Cerrando sesión...");
+  // 2. EL LOGOUT
+  const logout = async (targetRoute?: string) => {
+    // 2. Limpieza de LocalStorage
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
-    setUser(null);
-    // Redirigir fuera
-    window.location.href = "/login";
+
+    // 🌟 3. DETECCIÓN AUTOMÁTICA DE ENTORNO 🌟
+    // Si no me envían una ruta, reviso dónde estoy parado.
+    let finalRoute = targetRoute;
+    if (!finalRoute) {
+      const currentUrl = window.location.href; // Lee todo, sea web normal o hash router
+      if (currentUrl.includes("/pos")) {
+        finalRoute = "/pos-login"; // Si estoy en la caja, me quedo en la caja
+      } else {
+        finalRoute = "/login"; // Si estoy en el ERP administrativo, voy al ERP
+      }
+    }
+
+    // 4. Navegación Nativa
+    const isDesktopOrHash =
+      window.location.href.includes("file://") ||
+      window.location.hash.length > 0;
+
+    if (isDesktopOrHash) {
+      window.location.hash = finalRoute;
+    } else {
+      window.location.pathname = finalRoute;
+    }
+
+    // 5. Recarga forzada
+    setTimeout(() => {
+      window.location.reload();
+    }, 100);
   };
 
   return (
     <AuthContext.Provider
-      value={{
-        user,
-        login,
-        logout,
-        loading,
-        isAuthenticated: !!user,
-      }}
+      value={{ user, login, logout, loading, isAuthenticated: !!user }}
     >
-      {/* Bloqueamos la renderización de la App hasta saber si hay usuario o no.
-         Esto evita que el Dashboard intente cargar datos antes de tiempo.
-      */}
       {loading ? (
-        <div className="h-screen w-full flex items-center justify-center bg-slate-100">
+        <div className="h-screen flex items-center justify-center bg-slate-100">
           <div className="text-slate-500 animate-pulse">Cargando sesión...</div>
         </div>
       ) : (
@@ -121,6 +129,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error("useAuth debe usarse dentro de AuthProvider");
+  if (!context) throw new Error("useAuth...");
   return context;
 };

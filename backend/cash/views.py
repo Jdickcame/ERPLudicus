@@ -4,15 +4,16 @@ from datetime import date
 from core.pagination import StandardResultsSetPagination
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.db.models import Sum
+from django.db.models import Q, Sum
+from django.http import HttpResponse
 from django.utils import timezone
-from rest_framework import status, viewsets
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from sales.pdf_engine import TicketEngine
 
-from cash import serializers
-
+# Importaciones locales
 from .models import CashMovement, CashRegister, CashShift
 from .serializers import (
     CashMovementSerializer,
@@ -46,7 +47,6 @@ class CashRegisterViewSet(viewsets.ModelViewSet):
 
 
 class CashShiftViewSet(viewsets.ModelViewSet):
-    queryset = CashShift.objects.all().order_by("-opened_at")
     serializer_class = CashShiftSerializer
     permission_classes = [IsAuthenticated]
 
@@ -96,8 +96,33 @@ class CashShiftViewSet(viewsets.ModelViewSet):
         return queryset
 
     def perform_create(self, serializer):
-        # Al crear (Apertura), asignamos usuario y estado OPEN
-        serializer.save(user=self.request.user, status="OPEN")
+        user = self.request.user
+        register_id = self.request.data.get("cash_register")
+
+        # 🛑 REGLA 1: Un cajero no puede tener dos turnos abiertos al mismo tiempo
+        if CashShift.objects.filter(user=user, status="OPEN").exists():
+            raise serializers.ValidationError(
+                {
+                    "error": "Ya tienes un turno de caja abierto actualmente. Ciérralo antes de abrir otro."
+                }
+            )
+
+        # 🛑 REGLA 2: Nadie puede usar una caja que ya está abierta
+        if CashShift.objects.filter(
+            cash_register_id=register_id, status="OPEN"
+        ).exists():
+            raise serializers.ValidationError(
+                {
+                    "error": "Esta terminal ya está ocupada por otro cajero. Elige otra o pide que la cierren."
+                }
+            )
+
+        # ✅ Si pasa las reglas, abrimos la caja (respetando el modo Offline)
+        uuid_from_front = self.request.data.get("uuid")
+        if uuid_from_front:
+            serializer.save(user=user, status="OPEN", uuid=uuid_from_front)
+        else:
+            serializer.save(user=user, status="OPEN")
 
     @action(detail=False, methods=["get"])
     def current(self, request):
@@ -312,19 +337,18 @@ class CashMovementViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # 1. Empezamos con todos los movimientos ordenados por fecha (más reciente arriba)
         queryset = CashMovement.objects.all().order_by("-created_at")
-
-        # 2. Buscamos si el frontend nos mandó un "?shift=XX"
         shift_id = self.request.query_params.get("shift")
-
-        # 3. Si mandó ID, filtramos. Si no, devolvemos todo (o nada, según prefieras).
         if shift_id:
             queryset = queryset.filter(shift_id=shift_id)
-
         return queryset
 
     def perform_create(self, serializer):
+        data = (
+            serializer.initial_data
+            if hasattr(serializer, "initial_data")
+            else self.request.data
+        )
         user = self.request.user
 
         # 1. Validar que el usuario tenga caja abierta
@@ -334,29 +358,94 @@ class CashMovementViewSet(viewsets.ModelViewSet):
                 {"error": "No tienes una caja abierta. Abre caja primero."}
             )
 
-        # 🛑 2. EL GUARDIÁN: Validar permisos de movimiento manual
-        # Si el usuario NO es un ADMIN o MANAGER, le exigimos el PIN
-        if user.role not in ["ADMIN", "MANAGER"]:
-            supervisor_pin = self.request.data.get("supervisor_pin")
+        # 2. EL GUARDIÁN: Validar permisos de movimiento manual
+        supervisor_to_save = None
+        # Solo exigimos pin si no es venta automática. (Las ventas las valida el módulo sales)
+        if data.get("concept") != "SALE":
+            if user.role not in ["ADMIN", "MANAGER"]:
+                supervisor_pin = data.get("supervisor_pin")
 
-            if not supervisor_pin:
-                raise serializers.ValidationError(
-                    {
-                        "error": "No tienes permisos. Se requiere PIN de un Gerente/Admin."
-                    }
-                )
+                if not supervisor_pin:
+                    raise serializers.ValidationError(
+                        {
+                            "error": "No tienes permisos. Se requiere PIN de un Gerente/Admin."
+                        }
+                    )
 
-            # Buscamos un usuario con ese PIN que SÍ sea gerente o admin
-            supervisor = User.objects.filter(
-                pin=supervisor_pin, role__in=["ADMIN", "MANAGER"]
-            ).first()
+                supervisor_to_save = User.objects.filter(
+                    pin=supervisor_pin, role__in=["ADMIN", "MANAGER"]
+                ).first()
 
-            if not supervisor:
-                raise serializers.ValidationError(
-                    {
-                        "error": "PIN inválido o el usuario no tiene permisos de gerencia."
-                    }
-                )
+                if not supervisor_to_save:
+                    raise serializers.ValidationError(
+                        {
+                            "error": "PIN inválido o el usuario no tiene permisos de gerencia."
+                        }
+                    )
+            else:
+                supervisor_to_save = user  # Si es jefe, él mismo se autoriza
 
-        # ✅ 3. Guardar el movimiento (Se ejecuta solo si pasó el Guardián o si ya era Jefe)
-        serializer.save(user=user, shift=shift)
+        # 3. Datos Offline (Opcionales)
+        offline_uuid = data.get("uuid")
+        offline_date = data.get("created_at")
+
+        save_kwargs = {
+            "user": user,
+            "shift": shift,
+            "authorized_by": supervisor_to_save,
+        }
+
+        if offline_uuid:
+            save_kwargs["uuid"] = offline_uuid
+            save_kwargs["is_synced"] = False
+
+        # ✅ 4. Guardar el movimiento
+        movement = serializer.save(**save_kwargs)
+
+        # Respetar fecha offline si existe
+        if offline_date:
+            movement.created_at = offline_date
+            movement.save()
+
+    # 🔥 MOTOR DE SINCRONIZACIÓN MASIVA PARA MOVIMIENTOS OFFLINE 🔥
+    @action(detail=False, methods=["post"])
+    def bulk_sync(self, request):
+        movements_data = request.data
+
+        if not isinstance(movements_data, list):
+            return Response(
+                {"error": "Se esperaba una lista de movimientos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        synced_count = 0
+        errors = []
+
+        for index, mov_json in enumerate(movements_data):
+            mov_uuid = mov_json.get("uuid")
+
+            # Idempotencia: Evitar duplicar gastos/ingresos
+            if mov_uuid and CashMovement.objects.filter(uuid=mov_uuid).exists():
+                continue
+
+            serializer = self.get_serializer(data=mov_json)
+
+            try:
+                if serializer.is_valid():
+                    self.perform_create(serializer)
+                    synced_count += 1
+                else:
+                    errors.append(
+                        {"index": index, "uuid": mov_uuid, "errors": serializer.errors}
+                    )
+            except Exception as e:
+                errors.append({"index": index, "uuid": mov_uuid, "errors": str(e)})
+
+        return Response(
+            {
+                "message": "Sincronización finalizada",
+                "synced_count": synced_count,
+                "errors": errors,
+            },
+            status=status.HTTP_200_OK,
+        )

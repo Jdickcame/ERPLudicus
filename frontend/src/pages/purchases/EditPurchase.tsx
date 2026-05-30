@@ -23,17 +23,20 @@ import { useBranch } from "../../context/BranchContext";
 
 // --- CONSTANTES ---
 const INVOICE_UNIT_OPTIONS = [
-  { value: "UNIDAD", label: "Unidad (NIU)" },
-  { value: "CAJA", label: "Caja (CX)" },
-  { value: "FARDO", label: "Fardo (FD)" },
-  { value: "PAQUETE", label: "Paquete (PK)" },
-  { value: "SACO", label: "Saco (SA)" },
-  { value: "LITRO", label: "Litros (LTR)" },
-  { value: "KILO", label: "Kilos (KGM)" },
-  { value: "MILLAR", label: "Millar (MIL)" },
-  { value: "GALON", label: "Galón (GLN)" },
-  { value: "BOLSA", label: "Bolsa (BLS)" },
-  { value: "SERVICIO", label: "Servicio (SRV)" },
+  { value: "NIU", label: "Unidad (NIU)" },
+  { value: "CAJ", label: "Caja (CAJ)" },
+  { value: "FARD", label: "Fardo (FARD)" },
+  { value: "PAA", label: "Paquete (PAA)" },
+  { value: "SAC", label: "Saco (SAC)" },
+  { value: "LTR", label: "Litro (LTR)" },
+  { value: "KGM", label: "Kilogramo (KGM)" },
+  { value: "MIL", label: "Millar (MIL)" },
+  { value: "GLN", label: "Galón (GLN)" },
+  { value: "BLS", label: "Bolsa (BLS)" },
+  { value: "LATA", label: "Lata (LATA)" },
+  { value: "BT", label: "Botella (BT)" },
+  { value: "SRV", label: "Servicio (SRV)" },
+  { value: "RLL", label: "Rollo (RLL)" },
 ];
 
 interface Option {
@@ -55,7 +58,7 @@ interface PurchaseDetail {
   category: string | number;
   area: string | number;
   invoice_unit: string;
-  multiplier: number;
+  units_per_package: number;
   quantity: number | string;
   unit_value: number | string;
   total_value: number | string;
@@ -160,7 +163,9 @@ const EditPurchase = () => {
           ),
           api.get("/purchases/purchases/choices/"),
           api.get("/purchases/categories/"),
-          api.get("/inventory/products/?page_size=1000"),
+          api.get("/inventory/products/", {
+            params: { for_purchase: true, page_size: 1000 },
+          }),
         ]);
 
         setBudgets(budgetsRes.data);
@@ -209,7 +214,7 @@ const EditPurchase = () => {
             category: d.category || "",
             area: d.area || "",
             invoice_unit: d.invoice_unit || "UNIDAD",
-            multiplier: Number(d.multiplier) || 1,
+            units_per_package: Number(d.units_per_package) || 1,
             quantity: Number(d.quantity),
             unit_value: Number(d.unit_value),
             total_value: Number(d.total_value),
@@ -308,7 +313,7 @@ const EditPurchase = () => {
         category: "",
         area: "",
         invoice_unit: "UNIDAD",
-        multiplier: 1,
+        units_per_package: 1,
         quantity: 1,
         unit_value: 0,
         total_value: 0,
@@ -326,7 +331,7 @@ const EditPurchase = () => {
     const hasEmptyLine = details.some((d) => !d.category || !d.area);
     if (hasEmptyLine)
       return alert(
-        "⚠️ Todas las líneas deben tener asignada un Área y una Categoría.",
+        "Todas las líneas deben tener asignada un Área y una Categoría.",
       );
 
     const payload = {
@@ -351,7 +356,7 @@ const EditPurchase = () => {
         category: d.category || null,
         area: d.area || null,
         invoice_unit: d.invoice_unit,
-        multiplier: Number(d.multiplier),
+        units_per_package: Number(d.units_per_package),
         quantity: Number(d.quantity),
         unit_value: Number(d.unit_value),
         total_value: Number(d.total_value).toFixed(2),
@@ -675,7 +680,7 @@ const EditPurchase = () => {
               const uom = prodSelect?.uom_display || "UND";
 
               const currentInvQty =
-                Number(row.quantity) * Number(row.multiplier);
+                Number(row.quantity) * Number(row.units_per_package);
 
               const rowTotalWithTax =
                 Number(row.total_value) *
@@ -784,11 +789,11 @@ const EditPurchase = () => {
                           type="number"
                           step="0.01"
                           className="w-full border p-1.5 rounded text-center font-bold outline-none focus:border-blue-400 text-sm text-orange-600 bg-orange-50"
-                          value={row.multiplier}
+                          value={row.units_per_package}
                           onChange={(e) =>
                             updateRow(
                               index,
-                              "multiplier",
+                              "units_per_package",
                               Number(e.target.value),
                             )
                           }

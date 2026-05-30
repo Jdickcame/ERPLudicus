@@ -38,7 +38,7 @@ class TicketEngine:
     def generate(self, doc_obj, title_lbl, items, total_label="TOTAL", is_note=False):
         sale = doc_obj.sale if is_note else doc_obj
 
-        # 👇 NUEVO: Detectar si es cortesía
+        # Detectar si es cortesía
         is_courtesy = getattr(sale, "is_courtesy", False)
         if is_courtesy:
             title_lbl = "TICKET DE CORTESÍA"
@@ -51,7 +51,6 @@ class TicketEngine:
             (len(sale.payments.all()) * self.row_h + self.row_h) if not is_note else 0
         )
 
-        # 👇 MODIFICADO: Si es cortesía no hay QR, ahorramos papel térmico
         qr_size = self.ancho_util * 0.45 if not is_courtesy else 0
         qr_h = qr_size + (15 * mm) if not is_courtesy else (20 * mm)
 
@@ -63,7 +62,7 @@ class TicketEngine:
 
         # --- 1. CABECERA ---
         c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(self.x_cen, y, "GRUPO LÚDICUS")
+        c.drawCentredString(self.x_cen, y, "GRUPO LUDICUS")
         y -= self.row_h * 1.2
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(self.x_cen, y, "AGA CORP S.A.C.")
@@ -86,9 +85,7 @@ class TicketEngine:
         y -= self.row_h * 1.5
 
         # --- 2. DATOS DEL DOCUMENTO ---
-        c.setFont(
-            "Helvetica-Bold", 11 if is_courtesy else 9
-        )  # Más grande si es cortesía
+        c.setFont("Helvetica-Bold", 11 if is_courtesy else 9)
         c.drawCentredString(self.x_cen, y, title_lbl.upper())
         y -= self.row_h * 1.2
         c.setFont("Helvetica-Bold", 11)
@@ -131,7 +128,6 @@ class TicketEngine:
             c.drawString(val_x, y, line)
             y -= self.row_h
 
-        # 👇 NUEVO: Imprimir quién autorizó si es cortesía
         if is_courtesy and getattr(sale, "authorized_by", None):
             auth_user = sale.authorized_by
             auth_name = (
@@ -193,7 +189,7 @@ class TicketEngine:
         y -= self.row_h
 
         c.setFont("Helvetica", 7)
-        valor_real_regalos = 0  # Para sumar cuánto costaba todo originalmente
+        valor_real_regalos = 0
         for d in items:
             p_unit = float(d.subtotal) / float(d.quantity) if d.quantity > 0 else 0
             prod_name = d.product.name
@@ -228,7 +224,6 @@ class TicketEngine:
         c.setFont("Helvetica", 8)
         lbl_tot_x = self.x_der - (20 * mm)
 
-        # 👇 NUEVO: Mostrar el descuento explícito si es cortesía
         if is_courtesy:
             c.drawRightString(lbl_tot_x, y, "Valor Real: S/")
             c.drawRightString(self.x_der, y, f"{valor_real_regalos:.2f}")
@@ -303,7 +298,6 @@ class TicketEngine:
             y -= self.row_h * 1.5
 
         # --- 8. QR Y PIE DE PÁGINA ---
-        # 👇 MODIFICADO: Bloque completo para dividir Normal vs Cortesía
         if not is_courtesy:
             c.setFont("Helvetica", 7)
             doc_type_footer = (
@@ -319,14 +313,29 @@ class TicketEngine:
             )
             y -= self.row_h * 2
 
-            # Generar QR
+            # Generar QR Oficial
             doc_code = (
                 getattr(doc_obj, "note_type", "07")
                 if is_note
                 else sale.invoice_type_code
             )
 
-            qr_data = f"20491934671|{doc_code}|{doc_obj.series}|{doc_obj.number}|{total_igv}|{total_doc}|{doc_obj.date.strftime('%d/%m/%Y')}|{sale.customer.document_type if sale.customer else '-'}|{sale.customer.tax_id if sale.customer else '-'}|"
+            # 1. Preparar datos exactos para SUNAT
+            fecha_qr = doc_obj.date.strftime("%Y-%m-%d")
+
+            if sale.customer:
+                tipo_doc_cli = "6" if len(sale.customer.tax_id) == 11 else "1"
+                num_doc_cli = sale.customer.tax_id
+            else:
+                tipo_doc_cli = "0"
+                num_doc_cli = "00000000"
+
+            # 2. Obtener el Hash de BD
+            hash_sunat = getattr(sale, "sunat_hash", "") or ""
+
+            # 3. Armar la cadena oficial
+            qr_data = f"20491934671|{doc_code}|{doc_obj.series}|{doc_obj.number}|{total_igv}|{total_doc}|{fecha_qr}|{tipo_doc_cli}|{num_doc_cli}|{hash_sunat}|"
+
             qr_code = qr.QrCodeWidget(qr_data)
             qr_code.barWidth = qr_size
             qr_code.barHeight = qr_size
@@ -347,7 +356,6 @@ class TicketEngine:
             y -= self.row_h * 1.5
 
         else:
-            # 🛑 ESTE ES EL FOOTER EXCLUSIVO DE CORTESÍA (Sin QR)
             c.setFont("Helvetica-Bold", 10)
             c.drawCentredString(self.x_cen, y, "*** NO VÁLIDO PARA SUNAT ***")
             y -= self.row_h * 1.5
@@ -372,17 +380,13 @@ class TicketEngine:
 
     def generate_hourly_report(self, opened_at, hourly_data):
         sorted_hours = sorted(hourly_data.items())
-
-        # 1. Aumentamos la altura base para que no quede como un cuadrito minúsculo
         base_h = 90 * mm
-        filas_h = len(sorted_hours) * (self.row_h * 1.8)  # Más espacio entre filas
+        filas_h = len(sorted_hours) * (self.row_h * 1.8)
         alto_total = base_h + filas_h
 
         c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
-        # 2. Empezamos a dibujar más abajo (12mm de margen superior en lugar de 6)
         y = alto_total - (12 * mm)
 
-        # --- CABECERA DEL REPORTE ---
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(self.x_cen, y, "REPORTE POR HORA")
         y -= self.row_h * 1.5
@@ -395,7 +399,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- TÍTULOS DE COLUMNAS ---
         c.setFont("Helvetica-Bold", 7)
         c.drawString(self.x_izq, y, "HORA")
         c.drawRightString(self.x_cen + (4 * mm), y, "CANT")
@@ -406,7 +409,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- FILAS ---
         c.setFont("Helvetica", 7)
         total_tickets = 0
         total_bruto = 0.0
@@ -424,7 +426,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- TOTALES FINALES ---
         c.setFont("Helvetica-Bold", 8)
         c.drawString(self.x_izq, y, "TOTALES:")
         c.drawRightString(self.x_cen + (4 * mm), y, str(total_tickets))
@@ -435,15 +436,13 @@ class TicketEngine:
 
     def generate_pmix_report(self, pmix_data):
         sorted_pmix = sorted(pmix_data.items(), key=lambda item: item[1], reverse=True)
-
         base_h = 80 * mm
         filas_h = len(sorted_pmix) * (self.row_h * 1.8)
         alto_total = base_h + filas_h
 
         c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
-        y = alto_total - (12 * mm)  # Margen superior más amplio
+        y = alto_total - (12 * mm)
 
-        # --- CABECERA ---
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(self.x_cen, y, "PRODUCT MIX (PMIX)")
         y -= self.row_h * 1.5
@@ -454,7 +453,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- TÍTULOS DE COLUMNAS ---
         c.setFont("Helvetica-Bold", 7)
         c.drawString(self.x_izq, y, "PRODUCTO")
         c.drawRightString(self.x_der, y, "CANTIDAD")
@@ -463,7 +461,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- FILAS ---
         c.setFont("Helvetica", 7)
         for name, qty in sorted_pmix:
             display_name = name[:25] + "..." if len(name) > 25 else name
@@ -478,14 +475,9 @@ class TicketEngine:
         c.save()
 
     def generate_courtesies_report(self, courtesy_pmix, total_costo, opened_at):
-        """
-        Genera el ticket consolidado de Cortesías (PMIX de Cortesías).
-        """
-        # Ordenar los productos del más regalado al menos regalado
         sorted_pmix = sorted(
             courtesy_pmix.items(), key=lambda item: item[1], reverse=True
         )
-
         base_h = 90 * mm
         filas_h = len(sorted_pmix) * (self.row_h * 1.8)
         alto_total = base_h + filas_h
@@ -493,7 +485,6 @@ class TicketEngine:
         c = canvas.Canvas(self.response, pagesize=(self.ancho_pt, alto_total))
         y = alto_total - (12 * mm)
 
-        # --- CABECERA ---
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(self.x_cen, y, "REPORTE DE CORTESIAS")
         y -= self.row_h * 1.2
@@ -510,7 +501,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- TÍTULOS DE COLUMNAS ---
         c.setFont("Helvetica-Bold", 7)
         c.drawString(self.x_izq, y, "PRODUCTO")
         c.drawRightString(self.x_der, y, "CANTIDAD")
@@ -519,14 +509,10 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- FILAS (LOS PRODUCTOS) ---
         c.setFont("Helvetica", 7)
         for name, qty in sorted_pmix:
-            # Acortamos el nombre si es muy largo para que no choque con la cantidad
             display_name = name[:25] + "..." if len(name) > 25 else name
-
             c.drawString(self.x_izq, y, display_name)
-            # Formateamos la cantidad para que se vea bonita (ej: 2 en lugar de 2.00)
             c.drawRightString(self.x_der, y, f"{qty:.2f}".rstrip("0").rstrip("."))
             y -= self.row_h * 1.5
 
@@ -534,7 +520,6 @@ class TicketEngine:
         self.drawDottedLine(c, y)
         y -= self.row_h * 1.5
 
-        # --- TOTAL FINAL ---
         c.setFont("Helvetica-Bold", 8)
         c.drawString(self.x_izq, y, "VALOR TOTAL ASUMIDO:")
         c.drawRightString(self.x_der, y, f"S/ {total_costo:.2f}")

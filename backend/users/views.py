@@ -139,3 +139,57 @@ def check_supervisor_permission(request):
         )
 
     return True
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def supervisor_auth(request):
+    """
+    Endpoint rápido para que el Frontend verifique un PIN.
+    Reutiliza tu función 'check_supervisor_permission'.
+    """
+    try:
+        # Tu función ya hace todo el trabajo sucio de buscar al jefe y verificar roles
+        check_supervisor_permission(request)
+
+        # Si la función no lanzó un error (PermissionDenied), significa que el PIN es correcto y es de un jefe.
+        return Response({"success": True})
+
+    except PermissionDenied as e:
+        # Si la función detecta que el PIN está mal o no es de un jefe, atrapamos el error y le avisamos a React.
+        return Response({"error": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def verify_my_pin(request):
+    """
+    Verifica que el PIN enviado pertenezca al usuario actualmente logueado.
+    Sirve para confirmar la identidad del cajero antes de mostrar saldos ciegos.
+    """
+    pin = request.data.get("pin")
+
+    if not pin:
+        return Response({"error": "Se requiere un PIN."}, status=400)
+
+    # Comparamos el PIN enviado con el PIN del usuario que hizo la petición
+    if request.user.pin == pin:
+        return Response({"success": True})
+    else:
+        return Response({"error": "PIN incorrecto."}, status=403)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def pos_users_list(request):
+    """
+    Endpoint para sincronizar usuarios con PINs al POS offline.
+    Devuelve solo usuarios activos que pueden usar el POS.
+    """
+    users = User.objects.filter(
+        is_active=True
+    ).values(
+        "id", "username", "first_name", "last_name", "role", "pin", "can_authorize_voids"
+    )
+    
+    return Response(list(users))

@@ -11,7 +11,6 @@ from .pdf_engine import A4Engine, TicketEngine
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def generate_pdf_view(request, pk):
-    # 1. PDF DE VENTA
     sale = get_object_or_404(Sale, pk=pk)
 
     tipo_papel = request.query_params.get("papel", "ticket_80")
@@ -30,10 +29,12 @@ def generate_pdf_view(request, pk):
     else:
         titulo = "TICKET INTERNO"
 
-    # Usamos el motor
-    engine = TicketEngine(response)
-    engine.generate(sale, titulo, sale.details.all())
+    if tipo_papel == "a4":
+        engine = A4Engine(response)
+    else:
+        engine = TicketEngine(response)
 
+    engine.generate(sale, titulo, sale.details.all())
     return response
 
 

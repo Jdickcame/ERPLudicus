@@ -1,3 +1,5 @@
+import uuid
+
 from branches.models import Branch
 from django.conf import settings
 from django.db import models
@@ -8,6 +10,7 @@ PAYMENT_METHODS = [
     ("CASH", "Efectivo"),
     ("CARD", "Visa / Yape"),
     ("TRANSFER", "Transferencia"),
+    ("PAGO_LINK", "Pago Link"),
     ("MIXED", "Pago Mixto"),
     (
         "COURTESY",
@@ -18,6 +21,8 @@ PAYMENT_METHODS = [
 DOCUMENT_TYPE_CHOICES = [
     ("DNI", "DNI"),
     ("RUC", "RUC"),
+    ("CE", "Carné de Extranjería"),
+    ("PASAPORTE", "Pasaporte"),
 ]
 
 STATUS_CHOICES = [
@@ -54,6 +59,13 @@ class Customer(models.Model):
 class Sale(models.Model):
     # --- RELACIONES ---
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT)
+    shift = models.ForeignKey(
+        "cash.CashShift",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="sales",
+    )
     notes = models.CharField(max_length=255, blank=True, null=True)
 
     uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
@@ -86,6 +98,24 @@ class Sale(models.Model):
 
     # --- TOTALES ---
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    discount_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0, help_text="Monto total descontado"
+    )
+    discount_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Razón del descuento (opcional)",
+    )
+    discount_authorized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="authorized_discounts",
+        help_text="Supervisor que autorizó el descuento con su PIN",
+    )
 
     # Este campo queda como referencia rápida (Resumen)
     payment_method = models.CharField(
@@ -120,6 +150,7 @@ class Sale(models.Model):
     sunat_pdf_url = models.TextField(null=True, blank=True)
 
     json_sent = models.JSONField(null=True, blank=True)
+    json_response = models.JSONField(null=True, blank=True)
 
     def __str__(self):
         client_name = self.customer.name if self.customer else "Público General"

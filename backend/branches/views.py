@@ -6,6 +6,6 @@ from .serializers import BranchSerializer
 
 
 class BranchViewSet(viewsets.ModelViewSet):
-    queryset = Branch.objects.all()
+    queryset = Branch.objects.all().order_by("id")
     serializer_class = BranchSerializer
     permission_classes = [IsAuthenticated]

@@ -7,12 +7,14 @@ import {
   Link,
   Lock,
   Plus,
+  Tag,
   Trash2,
   X,
 } from "lucide-react";
 import { useState } from "react";
 import toast from "react-hot-toast";
 import PinPad from "../../../components/common/PinPad";
+import { db } from "../../../db/database";
 
 interface Customer {
   id: number;
@@ -20,7 +22,6 @@ interface Customer {
   tax_id: string;
   document_type: string;
 }
-
 interface PaymentModalProps {
   total: number;
   selectedCustomer?: Customer;
@@ -38,7 +39,6 @@ interface PaymentModalProps {
   onClose: () => void;
   onConfirm: (paymentData: any) => void;
 }
-
 interface PaymentLine {
   id: number;
   method: "CASH" | "CARD" | "PAGO_LINK" | "TRANSFER" | "COURTESY";
@@ -54,34 +54,22 @@ const PaymentModal = ({
   onClose,
   onConfirm,
 }: PaymentModalProps) => {
-  // Configuración Documento (👇 NUEVO: Agregado "NOTA_VENTA")
   const [docType, setDocType] = useState<
     "BOLETA" | "FACTURA" | "TICKET" | "NOTA_VENTA"
-  >(() => {
-    return selectedCustomer?.document_type === "RUC" ? "FACTURA" : "BOLETA";
-  });
+  >(() => (selectedCustomer?.document_type === "RUC" ? "FACTURA" : "BOLETA"));
 
-  // --- ESTADOS ---
   const [isCourtesy, setIsCourtesy] = useState(false);
   const [showPinPad, setShowPinPad] = useState(false);
   const [tempPin, setTempPin] = useState("");
   const [supervisorPin, setSupervisorPin] = useState("");
+  const [pinError, setPinError] = useState("");
 
   const [payments, setPayments] = useState<PaymentLine[]>([]);
-
   const [currentMethod, setCurrentMethod] = useState<
     "CASH" | "CARD" | "TRANSFER" | "PAGO_LINK"
   >("CASH");
   const [currentAmount, setCurrentAmount] = useState<string>("");
 
-<<<<<<< HEAD
-  // --- CÁLCULOS DINÁMICOS ---
-  const effectiveTotal = isCourtesy ? 0 : total;
-  const totalPaid = payments.reduce((acc, p) => acc + p.amount, 0);
-  const remaining = isCourtesy ? 0 : effectiveTotal - totalPaid;
-  const change =
-    totalPaid > effectiveTotal && !isCourtesy ? totalPaid - effectiveTotal : 0;
-=======
   const [pinPadContext, setPinPadContext] = useState<
     "COURTESY" | "DISCOUNT" | null
   >(null);
@@ -111,36 +99,29 @@ const PaymentModal = ({
     totalPaid > effectiveTotal && !isCourtesy
       ? Number((totalPaid - effectiveTotal).toFixed(2))
       : 0;
->>>>>>> 1d99500 (App Kensis)
 
   const isReady = isCourtesy ? true : totalPaid >= effectiveTotal;
 
-  // --- MÉTODOS ---
+  // --- MÉTODOS DE PAGO ---
   const handleAddPayment = () => {
     let amount = parseFloat(currentAmount);
     if (!amount || amount <= 0) return;
-
-    if (currentMethod !== "CASH" && amount > remaining && remaining > 0) {
+    if (currentMethod !== "CASH" && amount > remaining && remaining > 0)
       amount = remaining;
-    }
-
-    const newPayment: PaymentLine = {
-      id: Date.now(),
-      method: currentMethod,
-      amount: amount,
-    };
-
-    setPayments([...payments, newPayment]);
+    setPayments([
+      ...payments,
+      { id: Date.now(), method: currentMethod, amount: amount },
+    ]);
     setCurrentAmount("");
   };
 
-  const removePayment = (id: number) => {
+  const removePayment = (id: number) =>
     setPayments(payments.filter((p) => p.id !== id));
-  };
 
   const handleDocTypeChange = (
     type: "BOLETA" | "FACTURA" | "TICKET" | "NOTA_VENTA",
   ) => {
+    setGeneralError("");
     if (type === "TICKET") {
       if (isAdmin) {
         setSupervisorPin("BYPASS");
@@ -148,42 +129,23 @@ const PaymentModal = ({
         setDocType("TICKET");
         setPayments([]);
       } else {
+        setPinError("");
+        setPinPadContext("COURTESY");
         setShowPinPad(true);
       }
       return;
     }
-
     if (type === "FACTURA" && selectedCustomer?.document_type !== "RUC") {
-<<<<<<< HEAD
-      return alert("Error: Para Factura necesitas un RUC.");
-=======
       setGeneralError("⚠️ Para Factura necesitas un cliente con RUC válido.");
       setTimeout(() => setGeneralError(""), 3000);
       return;
->>>>>>> 1d99500 (App Kensis)
     }
-
-    // 👇 IMPORTANTE: Si es Nota de Venta (NV), NO es cortesía, sí se cobra.
     setIsCourtesy(false);
     setSupervisorPin("");
-
-    // Solo borramos pagos si venimos de cortesía para no hacerles escribir doble
-    if (isCourtesy) {
-      setPayments([]);
-    }
-
+    if (isCourtesy) setPayments([]);
     setDocType(type);
   };
 
-<<<<<<< HEAD
-  const handlePinSubmit = () => {
-    if (tempPin.length < 4) return;
-
-    setSupervisorPin(tempPin);
-    setIsCourtesy(true);
-    setDocType("TICKET");
-    setPayments([]);
-=======
   const handleApplyDiscountRequest = () => {
     setDiscountError("");
     let val = parseFloat(discountValue);
@@ -235,28 +197,15 @@ const PaymentModal = ({
       setPayments([]);
     }
 
->>>>>>> 1d99500 (App Kensis)
     setShowPinPad(false);
     setTempPin("");
+    setPinPadContext(null);
+    setPinError("");
   };
 
   const handleConfirm = () => {
     if (!isReady) return;
 
-<<<<<<< HEAD
-    // Traducir el tipo de documento del Frontend al Backend (01, 03, 00, 99)
-    let invoiceTypeCode = "03"; // Boleta por defecto
-    if (docType === "FACTURA") invoiceTypeCode = "01";
-    if (docType === "TICKET") invoiceTypeCode = "99";
-    if (docType === "NOTA_VENTA") invoiceTypeCode = "00"; // 👈 NUEVO: Código interno para Nota de Venta
-
-    const payload = {
-      invoice_type_code: invoiceTypeCode, // Enviamos el código exacto
-      invoice_type: docType, // (Lo mantengo por si lo usas en otro lado)
-      payments: isCourtesy
-        ? [{ payment_method: "COURTESY", amount: 0 }]
-        : payments.map((p) => ({ payment_method: p.method, amount: p.amount })),
-=======
     if (docType === "FACTURA" && selectedCustomer?.document_type !== "RUC") {
       setGeneralError("⚠️ Las facturas exigen un cliente con RUC válido.");
       toast.error("Seleccione un cliente con RUC para Factura.");
@@ -316,12 +265,17 @@ const PaymentModal = ({
       invoice_type_code: invoiceTypeCode,
       invoice_type: docType,
       payments: processedPayments,
->>>>>>> 1d99500 (App Kensis)
       change: isCourtesy ? 0 : change,
       is_courtesy: isCourtesy,
       supervisor_pin: supervisorPin,
-    };
+      final_total: effectiveTotal,
+      discount_amount: appliedDiscount.amount,
+      discount_reason: appliedDiscount.reason,
+      discount_authorized_by_id: appliedDiscount.authorizedById,
 
+      tenderedAmount: montoRecibido,
+      changeAmount: isCourtesy ? 0 : change,
+    };
     onConfirm(payload);
   };
 
@@ -330,44 +284,32 @@ const PaymentModal = ({
   };
 
   return (
-<<<<<<< HEAD
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 font-sans">
-      <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row h-[600px] relative">
-        {/* PINPAD OVERLAY */}
-        {showPinPad && (
-          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in zoom-in-95">
-            <div className="bg-white p-6 rounded-2xl shadow-xl relative w-full max-w-sm mx-4">
-=======
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70] p-4 font-sans">
       {/* 👇 Ajustado para pantallas de terminales (menos ancho, altura adaptable) 👇 */}
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row min-h-[480px] max-h-[90vh] relative">
         {showPinPad && (
           <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center animate-in fade-in zoom-in-95">
             <div className="bg-white p-5 md:p-6 rounded-3xl shadow-2xl relative w-full max-w-sm mx-4">
->>>>>>> 1d99500 (App Kensis)
               <button
                 onClick={() => {
                   setShowPinPad(false);
                   setTempPin("");
+                  setPinPadContext(null);
+                  setPinError("");
                 }}
-<<<<<<< HEAD
-                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors"
-=======
                 className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-full p-1.5 transition-colors"
->>>>>>> 1d99500 (App Kensis)
               >
-                <X size={24} />
+                <X size={20} />
               </button>
               <PinPad
                 pin={tempPin}
-                setPin={setTempPin}
+                setPin={(val) => {
+                  setTempPin(val);
+                  setPinError("");
+                }}
                 onSubmit={handlePinSubmit}
                 maxLength={6}
                 title="Autorizar Cortesía"
-<<<<<<< HEAD
-                subtitle="Costo cero (no envía a SUNAT)"
-              />
-=======
                 subtitle="Requiere PIN de supervisor"
               />
               {pinError && (
@@ -377,7 +319,6 @@ const PaymentModal = ({
                   </span>
                 </div>
               )}
->>>>>>> 1d99500 (App Kensis)
             </div>
           </div>
         )}
@@ -431,15 +372,10 @@ const PaymentModal = ({
                     : "border-slate-200 text-slate-400 hover:bg-white"
                 }`}
               >
-<<<<<<< HEAD
-                <m.icon size={24} />
-                <span className="text-xs font-bold mt-1">{m.label}</span>
-=======
                 <m.icon size={22} className="md:w-[26px] md:h-[26px]" />{" "}
                 <span className="text-[10px] md:text-xs font-bold mt-1.5">
                   {m.label}
                 </span>
->>>>>>> 1d99500 (App Kensis)
               </button>
             ))}
           </div>
@@ -495,28 +431,14 @@ const PaymentModal = ({
           </button>
         </div>
 
-<<<<<<< HEAD
-        {/* === DERECHA: RESUMEN === */}
-        <div className="w-full md:w-1/2 p-6 flex flex-col bg-white">
-          <div className="flex justify-between items-center mb-6">
-=======
         {/* --- PANEL DERECHO --- */}
         <div className="w-full md:w-1/2 p-4 md:p-6 flex flex-col bg-white overflow-hidden">
           <div className="flex justify-between items-start mb-4 md:mb-6 shrink-0">
->>>>>>> 1d99500 (App Kensis)
             <div>
               <p className="text-[10px] md:text-xs font-bold text-slate-400 uppercase">
                 {isCourtesy ? "Costo Regular" : "Total Venta"}
               </p>
               <p
-<<<<<<< HEAD
-                className={`text-3xl font-black ${isCourtesy ? "text-slate-400 line-through" : "text-slate-800"}`}
-              >
-                S/ {total.toFixed(2)}
-              </p>
-              {isCourtesy && (
-                <p className="text-lg font-bold text-blue-600">
-=======
                 className={`font-black ${
                   isCourtesy || appliedDiscount.amount > 0
                     ? "text-slate-400 line-through text-lg md:text-2xl"
@@ -533,7 +455,6 @@ const PaymentModal = ({
               )}
               {isCourtesy && (
                 <p className="text-base md:text-lg font-bold text-blue-600 mt-0.5 md:mt-1">
->>>>>>> 1d99500 (App Kensis)
                   S/ 0.00 (Cortesía)
                 </p>
               )}
@@ -552,10 +473,6 @@ const PaymentModal = ({
             </div>
           </div>
 
-<<<<<<< HEAD
-          {/* 👇 NUEVO SELECTOR DE DOCUMENTOS DE 4 BOTONES */}
-          <div className="flex flex-col gap-1 mb-4">
-=======
           {!isCourtesy && (
             <div className="mb-3 md:mb-4 shrink-0">
               {appliedDiscount.amount > 0 ? (
@@ -676,7 +593,6 @@ const PaymentModal = ({
                 {generalError}
               </p>
             )}
->>>>>>> 1d99500 (App Kensis)
             <div className="flex bg-slate-100 p-1 rounded-lg">
               <button
                 onClick={() => handleDocTypeChange("BOLETA")}
@@ -722,14 +638,6 @@ const PaymentModal = ({
               </button>
             </div>
           </div>
-<<<<<<< HEAD
-          {docType === "NOTA_VENTA" && (
-            <p className="text-[10px] text-amber-600 font-bold bg-amber-50 p-1.5 rounded text-center mb-2 mt-[-8px]">
-              ⚠️ Control Interno - No viaja a SUNAT
-            </p>
-          )}
-=======
->>>>>>> 1d99500 (App Kensis)
 
           <div className="flex-1 overflow-y-auto border border-slate-100 rounded-xl mb-3 md:mb-4 bg-slate-50/50 p-1.5 md:p-2 space-y-1.5 custom-scrollbar">
             {isCourtesy ? (
@@ -737,9 +645,6 @@ const PaymentModal = ({
                 <CheckCircle size={36} className="mb-1 md:mb-2 text-blue-500" />
                 <p className="text-xs md:text-sm font-bold text-slate-700">
                   Cortesía Aprobada
-                </p>
-                <p className="text-xs text-slate-400">
-                  No requiere métodos de pago
                 </p>
               </div>
             ) : payments.length === 0 ? (

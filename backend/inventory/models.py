@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from branches.models import Branch
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -81,7 +83,9 @@ class Product(models.Model):
     product_type = models.CharField(
         max_length=20, choices=PRODUCT_TYPES, default="STOCKED"
     )
-    unit_of_measure = models.CharField(max_length=5, choices=UOM_CHOICES, default="NIU")
+    unit_of_measure = models.CharField(
+        max_length=20, choices=UOM_CHOICES, default="NIU"
+    )
     sku = models.CharField(max_length=50, unique=True, blank=True)
 
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
@@ -170,8 +174,6 @@ class ProductRecipe(models.Model):
         Product,
         related_name="used_in_recipes",
         on_delete=models.PROTECT,
-        # Validamos que el "Hijo" gestione stock (no puedes hacer una pizza con un "Servicio")
-        limit_choices_to={"manage_stock": True},
     )
     quantity = models.DecimalField(max_digits=10, decimal_places=4)
 
@@ -197,6 +199,13 @@ class Stock(models.Model):
     quantity = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
     min_stock = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
     average_cost = models.DecimalField(max_digits=12, decimal_places=4, default=0.0000)
+    selling_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Precio de venta para esta sede (si es null, usa el precio global del producto)",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -320,3 +329,111 @@ class Kardex(models.Model):
 
     def __str__(self):
         return f"{self.get_type_display()} - {self.product.sku}"
+
+
+# --- 8. TOMA DE INVENTARIO FÍSICO (AUDITORÍA CONTABLE) ---
+class PhysicalInventory(models.Model):
+    STATUS_CHOICES = (
+        ("DRAFT", "En Proceso (Borrador)"),
+        ("CLOSED", "Cerrado / Auditado"),
+    )
+
+    branch = models.ForeignKey(
+        "branches.Branch", related_name="physical_inventories", on_delete=models.PROTECT
+    )
+    created_by = models.ForeignKey(
+        User, related_name="created_inventories", on_delete=models.PROTECT
+    )
+
+    reference = models.CharField(max_length=50, blank=True)
+
+    # 👇 NUEVO: Rango de fechas de la auditoría 👇
+    start_date = models.DateField(
+        help_text="Fecha de inicio del periodo auditado", null=True
+    )
+    end_date = models.DateField(
+        help_text="Fecha de fin del periodo auditado", null=True
+    )
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT")
+    notes = models.TextField(blank=True, help_text="Observaciones generales del conteo")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            count = PhysicalInventory.objects.filter(branch=self.branch).count() + 1
+            sede_prefix = self.branch.name[:3].upper() if self.branch else "GEN"
+            self.reference = f"INV-{sede_prefix}-{str(count).zfill(4)}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.reference} - {self.get_status_display()}"
+
+
+class PhysicalInventoryDetail(models.Model):
+    ACTION_CHOICES = (
+        ("PENDING", "Pendiente de decisión"),
+        ("ADJUST", "Ajustar Sistema (Asumir merma/sobrante)"),
+        ("IGNORE", "Ignorar (Repondrán físico)"),
+    )
+
+    inventory = models.ForeignKey(
+        PhysicalInventory, related_name="details", on_delete=models.CASCADE
+    )
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+
+    # 👇 NUEVO: El viaje en el tiempo 👇
+    initial_stock = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        help_text="Stock al inicio del periodo",
+    )
+    total_inputs = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        help_text="Entradas/Compras en el periodo",
+    )
+    total_outputs = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        help_text="Salidas/Consumos en el periodo",
+    )
+
+    system_stock = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Stock Teórico Final (Inicial + Entradas - Salidas)",
+    )
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Costo promedio al cierre del periodo",
+    )
+
+    physical_stock = models.DecimalField(
+        max_digits=12, decimal_places=4, default=0, help_text="Conteo físico real"
+    )
+    difference = models.DecimalField(max_digits=12, decimal_places=4, default=0)
+
+    action_taken = models.CharField(
+        max_length=20, choices=ACTION_CHOICES, default="PENDING"
+    )
+    action_notes = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        unique_together = ("inventory", "product")
+
+    def save(self, *args, **kwargs):
+        # Auto-calcular la diferencia
+        self.difference = Decimal(str(self.physical_stock)) - Decimal(
+            str(self.system_stock)
+        )
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.product.name}: {self.difference} dif."

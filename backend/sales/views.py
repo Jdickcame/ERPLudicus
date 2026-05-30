@@ -1,14 +1,20 @@
 import threading
 from decimal import Decimal
 
+import openpyxl
 import requests
+from branches.models import Branch
 
 # Imports de Modelos
 from cash.models import CashMovement, CashShift
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from inventory.models import Kardex, Stock
+from django.db.models import Q, Sum
+from django.http import HttpResponse
+from events.models import Event, EventRegistration
+from inventory.models import Kardex, ProductRecipe, Stock
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 # DRF Imports
 from rest_framework import serializers, status, viewsets
@@ -34,12 +40,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
     def search_doc(self, request):
         doc_number = request.query_params.get("doc")
         if not doc_number:
-            return Response({"error": "Falta doc"}, status=400)
+            return Response({"error": "Falta el numero de documento"}, status=400)
 
         # 1. BÚSQUEDA LOCAL
         c = Customer.objects.filter(tax_id=doc_number).first()
         if c:
-            return Response(self.get_serializer(c).data)
+            return Response({"exists_local": True, "data": self.get_serializer(c).data})
 
         # 2. DETERMINAR EL TIPO DE DOCUMENTO
         doc_type = None
@@ -181,17 +187,186 @@ class CustomerViewSet(viewsets.ModelViewSet):
 class SaleViewSet(viewsets.ModelViewSet):
     serializer_class = SaleSerializer
     permission_classes = [IsAuthenticated]
-    queryset = Sale.objects.all()
+    queryset = Sale.objects.all().order_by("-id")
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+
+        # 1. IDENTIFICAMOS EL ORIGEN DE LA PETICIÓN
+        # Si no nos envían nada, asumimos que están en la caja registradora (pos)
+        origin = self.request.query_params.get("origin", "pos")
+        is_boss = user.is_superuser or getattr(user, "role", "") in ["ADMIN", "MANAGER"]
+
+        # 2. LÓGICA MIXTA
+        if origin == "web" and is_boss:
+            # ==========================================
+            # MODO WEB: El Admin está en su computadora viendo reportes
+            # ==========================================
+            branch_id = self.request.query_params.get("branch_id")
+            if branch_id:
+                queryset = queryset.filter(branch_id=branch_id)
+            shift_id = self.request.query_params.get("shift_id")
+            if shift_id:
+                queryset = queryset.filter(shift_id=shift_id)
+
+            # Capturamos y aplicamos los filtros
+            search = self.request.query_params.get("search")
+            start_date = self.request.query_params.get("start_date")
+            end_date = self.request.query_params.get("end_date")
+            doc_type = self.request.query_params.get("document_type")
+            payment_method = self.request.query_params.get("payment_method")
+            sunat_status = self.request.query_params.get("sunat_status")
+
+            # 👇 NUEVO: Atrapamos el filtro de Caja 👇
+            cash_register_id = self.request.query_params.get("cash_register_id")
+
+            start_datetime = self.request.query_params.get("start_datetime")
+            end_datetime = self.request.query_params.get("end_datetime")
+
+            if search:
+                # 🧠 Búsqueda Inteligente: Si el usuario pegó un documento con guion (Ej: F001-23 o FC11-100)
+                if "-" in search:
+                    partes = search.split("-")
+                    serie_buscada = partes[0].strip()
+                    numero_buscado = partes[1].strip()
+
+                    # Filtramos exigiendo que coincidan tanto la serie como el número (de la venta O de la nota de crédito)
+                    queryset = queryset.filter(
+                        Q(
+                            series__icontains=serie_buscada,
+                            number__icontains=numero_buscado,
+                        )
+                        | Q(
+                            credit_notes__series__icontains=serie_buscada,
+                            credit_notes__number__icontains=numero_buscado,
+                        )
+                    ).distinct()
+                else:
+                    # Búsqueda normal por cliente o por partes sueltas (incluyendo Notas de Crédito)
+                    queryset = queryset.filter(
+                        Q(customer__name__icontains=search)
+                        | Q(customer__tax_id__icontains=search)
+                        | Q(series__icontains=search)
+                        | Q(number__icontains=search)
+                        | Q(credit_notes__series__icontains=search)
+                        | Q(credit_notes__number__icontains=search)
+                    ).distinct()
+
+            if start_date:
+                queryset = queryset.filter(date__date__gte=start_date)
+            if end_date:
+                queryset = queryset.filter(date__date__lte=end_date)
+            if start_datetime:
+                queryset = queryset.filter(date__gte=start_datetime)
+            if end_datetime:
+                queryset = queryset.filter(date__lte=end_datetime)
+
+            if doc_type:
+                if doc_type == "BOL":
+                    queryset = queryset.filter(invoice_type_code="03")
+                elif doc_type == "FAC":
+                    queryset = queryset.filter(invoice_type_code="01")
+                elif doc_type == "NTV":
+                    queryset = queryset.filter(invoice_type_code="00")
+                elif doc_type == "TICKET":
+                    queryset = queryset.filter(invoice_type_code="99")
+                elif doc_type == "NC":
+                    queryset = queryset.filter(credit_notes__isnull=False).distinct()
+
+            if payment_method:
+                queryset = queryset.filter(
+                    payments__payment_method=payment_method
+                ).distinct()
+
+            if sunat_status:
+                if sunat_status == "PENDING":
+                    # Si es pendiente, buscamos los PENDING, los nulos o los vacíos por seguridad
+                    queryset = queryset.filter(
+                        Q(sunat_status="PENDING")
+                        | Q(sunat_status__isnull=True)
+                        | Q(sunat_status="")
+                    )
+                else:
+                    queryset = queryset.filter(sunat_status=sunat_status)
+
+            # 👇 NUEVO: Aplicamos el filtro de Caja 👇
+            if cash_register_id:
+                queryset = queryset.filter(shift__cash_register_id=cash_register_id)
+
+        else:
+            # ==========================================
+            # MODO POS: Cajero (o Admin operando la caja)
+            # ==========================================
+            current_shift = CashShift.objects.filter(user=user, status="OPEN").first()
+
+            if current_shift:
+                # Solo ve lo que ha cobrado en este turno
+                queryset = queryset.filter(shift=current_shift)
+            else:
+                # Si no abrió caja, la tabla sale vacía por seguridad
+                return queryset.none()
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        # 1. Obtenemos las ventas ya filtradas por fecha, sede, etc.
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # 2. 💰 LA MAGIA: Sumamos el campo 'total' de todas las ventas filtradas.
+        # Filtramos por status="COMPLETED" para que no sume el dinero de las ventas Anuladas.
+        total_sum = (
+            queryset.filter(status="COMPLETED").aggregate(total_sum=Sum("total"))[
+                "total_sum"
+            ]
+            or 0.0
+        )
+
+        # 3. Paginamos los resultados como siempre
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            # 4. 💉 Inyectamos el gran total en la respuesta JSON
+            response.data["total_amount"] = total_sum
+            return response
+
+        # Por si acaso no hay paginación (fallback)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({"results": serializer.data, "total_amount": total_sum})
+
+    def create(self, request, *args, **kwargs):
+        # 1. Ejecuta la creación normal
+        response = super().create(request, *args, **kwargs)
+
+        # 2. Interceptamos la respuesta para buscar si se generó un ticket de evento
+        sale_id = response.data.get("id")
+        if sale_id:
+            from events.models import EventRegistration
+
+            ticket = EventRegistration.objects.filter(sale_id=sale_id).first()
+
+            # 3. Si hay ticket, le mandamos los datos EXACTOS a React para el QR
+            if ticket:
+                response.data["generated_ticket_code"] = ticket.ticket_code
+                response.data["generated_ticket_quantity"] = ticket.total_quantity
+
+        return response
 
     def perform_create(self, serializer):
-        branch_id = self.request.data.get("branch_id")
+        # 1. EL TRUCO: Usamos initial_data en lugar de request.data para soportar envíos masivos
+        data = serializer.initial_data
+
+        # CAPTURAMOS EL ORIGEN PARA SEPARAR CAJA DE WEB 👇
+        origin = self.request.query_params.get("origin", "pos")
+
+        branch_id = data.get("branch_id")
         if not branch_id and hasattr(self.request.user, "branch"):
             branch_id = self.request.user.branch.id
 
-        is_courtesy = (
-            str(self.request.data.get("is_courtesy", "false")).lower() == "true"
-        )
+        is_courtesy = str(data.get("is_courtesy", "false")).lower() == "true"
         supervisor = None
+        supervisor_pin = data.get("supervisor_pin")
 
         if is_courtesy:
             if (
@@ -200,29 +375,35 @@ class SaleViewSet(viewsets.ModelViewSet):
             ):
                 supervisor = self.request.user
             else:
-                supervisor_pin = self.request.data.get("supervisor_pin")
+                # Si el PIN viene con prefijo "LOCAL:", significa que fue validado por el frontend (Dexie)
+                if supervisor_pin and str(supervisor_pin).startswith("LOCAL:"):
+                    parts = str(supervisor_pin).split(":")
+                    if len(parts) >= 2:
+                        supervisor_id = int(parts[1])
+                        supervisor = User.objects.filter(
+                            id=supervisor_id, is_active=True
+                        ).first()
+                elif supervisor_pin and supervisor_pin == "BYPASS":
+                    pass  # Admin bypass - no supervisor needed
+                else:
+                    # Validación normal de PIN (online)
+                    if not supervisor_pin:
+                        raise serializers.ValidationError(
+                            {"error": "No tienes permisos. Se requiere PIN."}
+                        )
 
-                if not supervisor_pin or supervisor_pin == "BYPASS":
-                    raise serializers.ValidationError(
-                        {
-                            "error": "No tienes permisos. Se requiere PIN de un Gerente/Admin."
-                        }
-                    )
+                    supervisor = User.objects.filter(
+                        pin=supervisor_pin, can_authorize_voids=True
+                    ).first()
 
-                supervisor = User.objects.filter(
-                    pin=supervisor_pin, can_authorize_voids=True
-                ).first()
-
-                if not supervisor:
-                    raise serializers.ValidationError(
-                        {
-                            "error": "PIN inválido o el usuario no tiene permisos de autorización."
-                        }
-                    )
+                    if not supervisor:
+                        raise serializers.ValidationError(
+                            {"error": "PIN invalido o sin permisos."}
+                        )
 
         with transaction.atomic():
-            # 1. Leemos del frontend
-            raw_invoice_type = self.request.data.get("invoice_type_code")
+            # 2. Seguimos usando la variable 'data'
+            raw_invoice_type = data.get("invoice_type_code")
             is_nota_venta = raw_invoice_type == "00"
             is_factura = raw_invoice_type == "01"
             cid = data.get("customer")
@@ -323,20 +504,80 @@ class SaleViewSet(viewsets.ModelViewSet):
             last = Sale.objects.filter(series=serie).order_by("-number").first()
             new_num = (int(last.number) + 1) if last else 1
 
-            # 4. Guardar Venta (Pasamos lo básico al serializer)
+            # 5. Guardar Venta
             sale = serializer.save(
                 branch_id=branch_id,
+                shift=shift,  # Si es 'web', shift guardará None
                 is_courtesy=is_courtesy,
                 authorized_by=supervisor,
+                customer=customer_obj,
             )
 
-            # 🔥 LA SOLUCIÓN MÁGICA: Forzamos el guardado de estos 3 campos directamente en el modelo
-            sale.series = serie
-            sale.number = str(new_num).zfill(8)
-            sale.invoice_type_code = tipo
-            sale.save()  # Aquí aseguramos que la BD tome el "00" y el "NV01"
+            # RESPETAR EL CORRELATIVO DEL FRONTEND (ventas offline)
+            offline_invoice_number = data.get("local_invoice_number")
+            if offline_invoice_number and "-" in offline_invoice_number:
+                # Extraer serie y correlativo del frontend
+                parts = offline_invoice_number.split("-")
+                if len(parts) == 2:
+                    frontend_serie = parts[0]
+                    frontend_number = parts[1].zfill(8)
+                    # Solo respetar si la serie del frontend coincide con la calculada
+                    if frontend_serie == serie:
+                        existing = Sale.objects.filter(
+                            series=serie, number=frontend_number
+                        ).exists()
+                        if not existing:
+                            sale.series = frontend_serie
+                            sale.number = frontend_number
+                    # Para notas de venta, verificar si viene con serie NV
+                    elif frontend_serie.startswith("NV") and is_nota_venta:
+                        existing = Sale.objects.filter(
+                            series=frontend_serie, number=frontend_number
+                        ).exists()
+                        if not existing:
+                            serie = frontend_serie
+                            sale.series = frontend_serie
+                            sale.number = frontend_number
 
-            # 5. Detalles, Stock y Kardex
+            offline_uuid = data.get("uuid")
+            offline_date = data.get("date")
+
+            if offline_uuid:
+                sale.uuid = offline_uuid
+                sale.is_synced = False  # Marca que vino con retraso
+
+            # Si el POS se desconectó a las 2:00 PM y nos manda la venta a las 5:00 PM,
+            # respetamos las 2:00 PM como hora real de venta.
+            if offline_date:
+                from django.utils.dateparse import parse_datetime
+                from django.utils.timezone import is_aware, make_naive
+
+                # Convertimos el string de React a un objeto datetime de Python
+                dt = (
+                    parse_datetime(offline_date)
+                    if isinstance(offline_date, str)
+                    else offline_date
+                )
+
+                # Si tiene zona horaria (es 'aware'), se la quitamos (lo hacemos 'naive')
+                if dt and is_aware(dt):
+                    dt = make_naive(dt)
+
+                sale.date = dt
+            # ------------------------------------------------
+
+            # Solo sobreescribir correlativo si no vino del frontend
+            if not (
+                offline_invoice_number
+                and "-" in offline_invoice_number
+                and sale.series == serie
+            ):
+                sale.series = serie
+                sale.number = str(new_num).zfill(8)
+            sale.invoice_type_code = tipo
+            sale.save()
+
+            # 5. Detalles, Stock y Kardex (CON LÓGICA HÍBRIDA MTS/MTO/COMBOS)
             total_gravada, total_igv = 0, 0
 
             # DEFINIMOS LA FUNCIÓN RECURSIVA DENTRO DEL SCOPE
@@ -369,24 +610,71 @@ class SaleViewSet(viewsets.ModelViewSet):
                     st.quantity -= cantidad_a_descontar
                     st.save()
 
-                Kardex.objects.create(
-                    branch_id=branch_id,
-                    product=d.product,
-                    date=sale.date,
-                    type="OUT_SALE" if not is_courtesy else "OUT_COURTESY",
-                    quantity=d.quantity,
-                    unit_cost=d.unit_cost,
-                    total_cost=Decimal(str(d.quantity)) * Decimal(str(d.unit_cost)),
-                    balance_quantity=st.quantity,
-                    balance_unit_cost=st.average_cost,
-                    balance_total_cost=Decimal(str(st.quantity))
-                    * Decimal(str(st.average_cost)),
-                    user=self.request.user,
-                    description=f"Venta {sale.id}"
-                    if not is_courtesy
-                    else f"Cortesía {sale.id} (Aut: {supervisor.first_name})",
+                    Kardex.objects.create(
+                        branch_id=branch_id_local,
+                        product=producto,
+                        date=sale.date,
+                        type="OUT_SALE" if not is_courtesy else "OUT_COURTESY",
+                        quantity=-cantidad_a_descontar,
+                        unit_cost=costo_unitario,
+                        total_cost=Decimal(str(cantidad_a_descontar))
+                        * Decimal(str(costo_unitario)),
+                        balance_quantity=st.quantity,
+                        balance_unit_cost=st.average_cost,
+                        balance_total_cost=Decimal(str(st.quantity))
+                        * Decimal(str(st.average_cost)),
+                        user=self.request.user,
+                        description=f"Venta {sale.series}-{sale.number}"
+                        if not is_courtesy
+                        else f"Cortesia {sale.series}-{sale.number} (Aut: {supervisor.first_name if supervisor else 'Admin'})",
+                    )
+                    return costo_unitario
+
+                # =======================================================
+                # CASO 2: EL PRODUCTO NO MANEJA STOCK, PERO TIENE RECETA
+                # (MTO - Make To Order, Cafés, Combos, Promociones)
+                # =======================================================
+                elif not producto.manage_stock and producto.has_recipe:
+                    receta_items = ProductRecipe.objects.filter(
+                        finished_product=producto
+                    )
+                    costo_acumulado_receta = Decimal("0.0")
+
+                    for item in receta_items:
+                        cant_ingrediente_total = item.quantity * cantidad_a_descontar
+                        costo_ing = procesar_descuento_inventario(
+                            item.ingredient, cant_ingrediente_total, branch_id_local
+                        )
+                        costo_acumulado_receta += Decimal(str(costo_ing)) * Decimal(
+                            str(cant_ingrediente_total)
+                        )
+
+                    return (
+                        costo_acumulado_receta / Decimal(str(cantidad_a_descontar))
+                        if cantidad_a_descontar > 0
+                        else Decimal("0.0")
+                    )
+
+                # =======================================================
+                # CASO 3: SERVICIOS PUROS (Sin stock, sin receta)
+                # =======================================================
+                else:
+                    return Decimal("0.0")  # Los servicios no tienen costo de inventario
+
+            # --- PROCESAMOS CADA LÍNEA DE LA VENTA ---
+            for d in sale.details.all():
+                producto_vendido = d.product
+                cantidad_vendida = Decimal(str(d.quantity))
+
+                # Disparamos la función mágica
+                costo_final_unitario = procesar_descuento_inventario(
+                    producto_vendido, cantidad_vendida, branch_id
                 )
 
+                # Guardamos el costo real en el detalle de la venta para calcular utilidades luego
+                d.unit_cost = costo_final_unitario
+
+                # --- CALCULO DE IMPUESTOS POR LÍNEA ---
                 if not is_courtesy:
                     sub = float(d.subtotal)
                     base = sub / 1.18
@@ -395,12 +683,8 @@ class SaleViewSet(viewsets.ModelViewSet):
 
                 d.save()
 
-            sale.total_gravada = (
-                Decimal(str(total_gravada)) if not is_courtesy else Decimal("0")
-            )
-            sale.total_igv = (
-                Decimal(str(total_igv)) if not is_courtesy else Decimal("0")
-            )
+            sale.total_gravada = Decimal(str(total_gravada)) if not is_courtesy else Decimal("0")
+            sale.total_igv = Decimal(str(total_igv)) if not is_courtesy else Decimal("0")
 
             # 🔥 CORRECCIÓN SIRE: Aplicar descuento a total_gravada y total_igv
             if sale.discount_amount and sale.discount_amount > 0:
@@ -417,7 +701,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             # Si es Nota de Venta, la damos por aceptada internamente
             if is_nota_venta:
                 sale.sunat_status = "ACCEPTED"
-                sale.sunat_description = "Uso Interno (No enviada a SUNAT)"
+                sale.sunat_description = "Uso Interno"
 
             sale.save()
 
@@ -586,34 +870,59 @@ class SaleViewSet(viewsets.ModelViewSet):
                     finally:
                         connection.close()
 
-                threading.Thread(target=enviar_a_sunat, args=(sale.id,)).start()
+                if not getattr(self, "is_bulk_sync", False):
+                    transaction.on_commit(
+                        lambda: threading.Thread(
+                            target=enviar_a_sunat, args=(sale.id,)
+                        ).start()
+                    )
 
-    # 🔥 NUEVA ACCIÓN: REINTENTO MANUAL DE ENVÍO A SUNAT
+    # NUEVA ACCIÓN: REINTENTO MANUAL DE ENVÍO A SUNAT
     @action(detail=True, methods=["post"])
     def send_sunat(self, request, pk=None):
         sale = self.get_object()
 
         if sale.invoice_type_code == "99":
             return Response(
-                {"error": "Los tickets internos no se envían a SUNAT."},
+                {
+                    "error": "Los tickets internos no se envian a SUNAT.",
+                    "success": False,
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         if sale.sunat_status == "ACCEPTED":
             return Response(
-                {"message": "El documento ya está aceptado."}, status=status.HTTP_200_OK
+                {"message": "El documento ya esta aceptado.", "success": True},
+                status=status.HTTP_200_OK,
             )
 
         try:
+            # Llamamos al servicio para que haga el trabajo sucio y guarde en BD
             InvoiceService(sale).generar_comprobante()
-            sale.sunat_status = "ACCEPTED"
-            sale.save()
-            return Response(
-                {"message": "✅ Documento enviado y aceptado por SUNAT correctamente."}
-            )
+
+            # Recargamos el objeto desde la base de datos para ver qué estado le puso el InvoiceService
+            sale.refresh_from_db()
+
+            if sale.sunat_status == "ACCEPTED":
+                return Response(
+                    {
+                        "success": True,
+                        "message": "Documento enviado y aceptado por SUNAT correctamente.",
+                    }
+                )
+            else:
+                return Response(
+                    {
+                        "success": False,
+                        "error": sale.sunat_description
+                        or "El documento fue rechazado por SUNAT.",
+                    }
+                )
+
         except Exception as e:
             return Response(
-                {"error": f"Error SUNAT: {str(e)}"},
+                {"success": False, "error": f"Error interno al enviar: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -853,8 +1162,15 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
 
-        # 🛑 1. EL GUARDIÁN
-        if not getattr(user, "can_authorize_voids", False):
+        # Creamos una variable booleana para saber si el usuario es "Jefe"
+        is_boss = (
+            user.is_superuser
+            or user.role in ["ADMIN", "MANAGER"]
+            or getattr(user, "can_authorize_voids", False)
+        )
+
+        # Si NO es jefe, le exigimos estrictamente un PIN
+        if not is_boss:
             supervisor_pin = self.request.data.get("supervisor_pin")
 
             if not supervisor_pin:
@@ -864,18 +1180,26 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                     }
                 )
 
+            User = get_user_model()
             supervisor = User.objects.filter(
-                pin=supervisor_pin, can_authorize_voids=True
+                pin=supervisor_pin,
+                role__in=["ADMIN", "MANAGER"],
+                # (Opcional) Si quieres que los que tienen can_authorize_voids=True también puedan dar su PIN, ponlo aquí con Q()
             ).first()
 
-            if not supervisor:
+            if (
+                not supervisor
+                and not User.objects.filter(
+                    pin=supervisor_pin, can_authorize_voids=True
+                ).exists()
+            ):
                 raise serializers.ValidationError(
                     {
-                        "error": "PIN inválido o el usuario no tiene permisos de autorización."
+                        "error": "PIN invalido o el usuario no tiene permisos de autorizacion."
                     }
                 )
 
-        # ✅ 2. LÓGICA DE ANULACIÓN
+        # 2. LÓGICA DE ANULACIÓN
         sale_id = self.request.data.get("sale")
         sale = Sale.objects.get(pk=sale_id)
 
@@ -908,44 +1232,73 @@ class CreditNoteViewSet(viewsets.ModelViewSet):
                 note_type="07",
             )
 
-            # LOGISTICA INVERSA (Blindada con Decimal)
-            if note.note_type == "07":
-                for detail in sale.details.all():
-                    st = Stock.objects.get(branch=sale.branch, product=detail.product)
-                    st.quantity += detail.quantity
+            def procesar_devolucion_inventario(
+                producto, cantidad_a_devolver, branch_local
+            ):
+                from inventory.models import ProductRecipe
+
+                # CASO 1: MANEJA STOCK (MTS - Insumos o Productos Directos)
+                if producto.manage_stock:
+                    st, _ = Stock.objects.get_or_create(
+                        branch=branch_local, product=producto, defaults={"quantity": 0}
+                    )
+                    st.quantity += cantidad_a_devolver
                     st.save()
 
                     Kardex.objects.create(
-                        branch=sale.branch,
-                        product=detail.product,
+                        branch=branch_local,
+                        product=producto,
                         date=note.date,
                         type="IN_RETURN",
-                        quantity=detail.quantity,
+                        quantity=cantidad_a_devolver,
                         unit_cost=st.average_cost,
-                        total_cost=Decimal(str(detail.quantity))
+                        total_cost=Decimal(str(cantidad_a_devolver))
                         * Decimal(str(st.average_cost)),
                         balance_quantity=st.quantity,
                         balance_unit_cost=st.average_cost,
                         balance_total_cost=Decimal(str(st.quantity))
                         * Decimal(str(st.average_cost)),
                         user=self.request.user,
-                        description=f"Anulación {sale.series}-{sale.number}",
+                        description=f"Anulacion {sale.series}-{sale.number}",
                     )
 
-            # CAJA
-            shift = CashShift.objects.filter(
-                user=self.request.user, status="OPEN"
-            ).first()
-            if shift and note.note_type == "07":
+                # CASO 2: TIENE RECETA (MTO - Hamburguesas, Combos)
+                elif not producto.manage_stock and producto.has_recipe:
+                    receta_items = ProductRecipe.objects.filter(
+                        finished_product=producto
+                    )
+                    for item in receta_items:
+                        cant_ingrediente_total = item.quantity * cantidad_a_devolver
+                        # Llamada recursiva para devolver los ingredientes
+                        procesar_devolucion_inventario(
+                            item.ingredient, cant_ingrediente_total, branch_local
+                        )
+
+                # CASO 3: SERVICIOS (No se devuelve nada)
+                else:
+                    pass
+
+            # 3. EJECUTAMOS LA LOGÍSTICA INVERSA POR CADA LÍNEA DE LA VENTA
+            if note.note_type == "07":
+                for detail in sale.details.all():
+                    cantidad_devuelta = Decimal(str(detail.quantity))
+                    procesar_devolucion_inventario(
+                        detail.product, cantidad_devuelta, sale.branch
+                    )
+
+            # 4. CAJA (Reembolso de dinero)
+            original_shift = sale.shift
+            if original_shift and note.note_type == "07":
                 CashMovement.objects.create(
-                    shift=shift,
+                    shift=original_shift,
                     user=self.request.user,
                     amount=sale.total,
                     movement_type="OUT",
                     concept="REFUND",
-                    description=f"Devolución {sale.series}-{sale.number}",
+                    description=f"Devolucion {sale.series}-{sale.number}",
                     related_sale=sale,
                 )
+
             sale.status = "CANCELED"
             sale.save()
 

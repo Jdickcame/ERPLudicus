@@ -1,6 +1,7 @@
 import {
   ArrowDown,
   ArrowUp,
+  Calendar, // 👇 Importamos el icono
   Download,
   Edit,
   Eye,
@@ -46,6 +47,28 @@ const PurchaseList = () => {
   const [currencyFilter, setCurrencyFilter] = useState("ALL");
   const [costTypeFilter, setCostTypeFilter] = useState("ALL");
 
+  // 👇 NUEVO: Estados para el Periodo Contable 👇
+  const currentDate = new Date();
+  const [selectedYear, setSelectedYear] = useState(currentDate.getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState(
+    currentDate.getMonth() + 1,
+  );
+
+  const months = [
+    { value: 1, label: "Enero" },
+    { value: 2, label: "Febrero" },
+    { value: 3, label: "Marzo" },
+    { value: 4, label: "Abril" },
+    { value: 5, label: "Mayo" },
+    { value: 6, label: "Junio" },
+    { value: 7, label: "Julio" },
+    { value: 8, label: "Agosto" },
+    { value: 9, label: "Septiembre" },
+    { value: 10, label: "Octubre" },
+    { value: 11, label: "Noviembre" },
+    { value: 12, label: "Diciembre" },
+  ];
+
   // --- ESTADOS DE PAGINACIÓN Y ORDEN ---
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -67,6 +90,8 @@ const PurchaseList = () => {
         page: page,
         page_size: pageSize,
         ordering: ordering,
+        year: selectedYear, // 👈 Agregamos el Año
+        month: selectedMonth, // 👈 Agregamos el Mes
       };
 
       if (debouncedSearch) params.search = debouncedSearch;
@@ -100,12 +125,15 @@ const PurchaseList = () => {
     costTypeFilter,
     ordering,
     viewType,
+    selectedYear, // 👈 Dependencia del año
+    selectedMonth, // 👈 Dependencia del mes
   ]);
 
   useEffect(() => {
     fetchPurchases();
   }, [fetchPurchases]);
 
+  // Reiniciar a la página 1 si cambia CUALQUIER filtro (incluyendo mes y año)
   useEffect(() => {
     setPage(1);
   }, [
@@ -114,6 +142,8 @@ const PurchaseList = () => {
     costTypeFilter,
     currentBranch,
     viewType,
+    selectedYear, // 👈 Escucha cambios de año
+    selectedMonth, // 👈 Escucha cambios de mes
   ]);
 
   const handleSort = (field: string) => {
@@ -153,7 +183,11 @@ const PurchaseList = () => {
   const handleExportExcel = async () => {
     if (!currentBranch) return;
     try {
-      const params: any = { branch_id: currentBranch.id };
+      const params: any = {
+        branch_id: currentBranch.id,
+        year: selectedYear, // 👈 El Excel también respetará el periodo
+        month: selectedMonth, // 👈 El Excel también respetará el periodo
+      };
       if (debouncedSearch) params.search = debouncedSearch;
       if (currencyFilter !== "ALL") params.currency = currencyFilter;
       if (costTypeFilter !== "ALL") params.cost_type = costTypeFilter;
@@ -166,7 +200,10 @@ const PurchaseList = () => {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
       link.href = url;
-      link.setAttribute("download", "Historial_Compras.xlsx");
+      link.setAttribute(
+        "download",
+        `Historial_Compras_${selectedMonth}_${selectedYear}.xlsx`,
+      );
       document.body.appendChild(link);
       link.click();
       link.parentNode?.removeChild(link);
@@ -180,21 +217,55 @@ const PurchaseList = () => {
 
   return (
     <div className="p-6 animate-in fade-in duration-500">
-      {/* CABECERA */}
-      <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+      {/* CABECERA (Ahora incluye los selectores como en el Dashboard) */}
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center mb-6 gap-4">
         <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-slate-800">
-              Gestión de Compras
-            </h1>
-            <BranchSelector />
-          </div>
+          <h1 className="text-2xl font-bold text-slate-800">
+            Gestión de Compras
+          </h1>
           <p className="text-sm text-slate-500 mt-1">
             Total registros: <strong>{totalCount}</strong>
           </p>
         </div>
 
-        <div className="flex gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <BranchSelector />
+          <div className="h-6 w-px bg-slate-200 hidden md:block"></div>
+
+          {/* 👇 Selector de Periodo 👇 */}
+          <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
+            <Calendar size={16} className="text-slate-500" />
+            <select
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(Number(e.target.value))}
+              className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer"
+            >
+              {months.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <select
+              value={selectedYear}
+              onChange={(e) => setSelectedYear(Number(e.target.value))}
+              className="bg-transparent text-sm font-bold text-slate-700 outline-none cursor-pointer"
+            >
+              <option value={currentDate.getFullYear()}>
+                {currentDate.getFullYear()}
+              </option>
+              <option value={currentDate.getFullYear() - 1}>
+                {currentDate.getFullYear() - 1}
+              </option>
+              <option value={currentDate.getFullYear() - 2}>
+                {currentDate.getFullYear() - 2}
+              </option>
+            </select>
+          </div>
+
+          <div className="h-6 w-px bg-slate-200 hidden lg:block"></div>
+
+          {/* Botones de acción */}
           <button
             onClick={handleExportExcel}
             className="bg-emerald-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-emerald-700 transition shadow-md font-medium"
@@ -205,16 +276,16 @@ const PurchaseList = () => {
             to="/purchases/new"
             className="bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-700 transition shadow-md font-medium"
           >
-            <Plus size={18} /> Nuevo Registro
+            <Plus size={18} /> Nuevo
           </Link>
         </div>
       </div>
 
       {/* PESTAÑAS DE NAVEGACIÓN */}
-      <div className="flex border-b border-slate-200 mb-6">
+      <div className="flex border-b border-slate-200 mb-6 overflow-x-auto">
         <button
           onClick={() => setViewType("PURCHASES")}
-          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${
+          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors whitespace-nowrap ${
             viewType === "PURCHASES"
               ? "border-blue-600 text-blue-600 bg-blue-50/50"
               : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50"
@@ -224,7 +295,7 @@ const PurchaseList = () => {
         </button>
         <button
           onClick={() => setViewType("NOTES")}
-          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${
+          className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors whitespace-nowrap ${
             viewType === "NOTES"
               ? "border-orange-500 text-orange-600 bg-orange-50/50"
               : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50"
@@ -332,7 +403,7 @@ const PurchaseList = () => {
                     colSpan={10}
                     className="text-center py-10 text-slate-400 text-sm"
                   >
-                    No se encontraron registros.
+                    No se encontraron registros en este periodo.
                   </td>
                 </tr>
               ) : (

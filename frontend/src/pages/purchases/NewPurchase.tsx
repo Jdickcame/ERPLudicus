@@ -46,17 +46,20 @@ interface Product {
   sku: string;
   stock: number;
   last_cost?: number | string;
+  area?: number | null;
+  area_name?: string;
+  category?: number | null;
+  category_name?: string;
 }
 interface PurchaseDetail {
   product_id: number | null;
+  product_search?: string;
   description: string;
   category: string | number;
   area: string | number;
   quantity: number | string;
-  // 👇 NUEVOS CAMPOS DE EMPAQUE 👇
   invoice_unit: string;
   units_per_package: number | string;
-  // -----------------------------
   unit_value: number | string;
   total_value: number | string;
   tax_percentage: number;
@@ -73,19 +76,22 @@ const NewPurchase = () => {
   const { currentBranch } = useBranch();
   const topRef = useRef<HTMLDivElement>(null);
 
-  // --- OPCIONES DE EMPAQUE (UNIDADES DE FACTURA) ---
+  // --- OPCIONES DE EMPAQUE (UNIDADES DE FACTURA - CÓDIGOS SUNAT) ---
   const INVOICE_UNIT_OPTIONS = [
-    { value: "UNIDAD", label: "Unidad (NIU)" },
-    { value: "CAJA", label: "Caja (CX)" },
-    { value: "FARDO", label: "Fardo (FD)" },
-    { value: "PAQUETE", label: "Paquete (PK)" },
-    { value: "SACO", label: "Saco (SA)" },
-    { value: "LITRO", label: "Litros (LTR)" },
-    { value: "KILO", label: "Kilos (KGM)" },
-    { value: "MILLAR", label: "Millar (MIL)" },
-    { value: "GALON", label: "Galón (GLN)" },
-    { value: "BOLSA", label: "Bolsa (BLS)" },
-    { value: "SERVICIO", label: "Servicio (SRV)" },
+    { value: "NIU", label: "Unidad (NIU)" },
+    { value: "CAJ", label: "Caja (CAJ)" },
+    { value: "FARD", label: "Fardo (FARD)" },
+    { value: "PAA", label: "Paquete (PAA)" },
+    { value: "SAC", label: "Saco (SAC)" },
+    { value: "LTR", label: "Litro (LTR)" },
+    { value: "KGM", label: "Kilogramo (KGM)" },
+    { value: "MIL", label: "Millar (MIL)" },
+    { value: "GLN", label: "Galón (GLN)" },
+    { value: "BLS", label: "Bolsa (BLS)" },
+    { value: "LATA", label: "Lata (LATA)" },
+    { value: "BT", label: "Botella (BT)" },
+    { value: "SRV", label: "Servicio (SRV)" },
+    { value: "RLL", label: "Rollo (RLL)" },
   ];
 
   // --- ESTADOS DE DATOS MAESTROS ---
@@ -123,6 +129,14 @@ const NewPurchase = () => {
 
   // --- BUSQUEDA AL BACKEND ---
   const [isSearchingSupplier, setIsSearchingSupplier] = useState(false);
+  const [activeDropdownIndex, setActiveDropdownIndex] = useState<number | null>(
+    null,
+  );
+  const [productSearchResults, setProductSearchResults] = useState<Product[]>(
+    [],
+  );
+  const [isSearchingProduct, setIsSearchingProduct] = useState(false);
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- CABECERA LIMPIA ---
   const [header, setHeader] = useState({
@@ -147,17 +161,32 @@ const NewPurchase = () => {
   const [details, setDetails] = useState<PurchaseDetail[]>([
     {
       product_id: null,
+      product_search: "",
       description: "",
       category: "",
       area: "",
       quantity: 1,
-      invoice_unit: "UNIDAD", // 👈 Defecto
-      units_per_package: 1, // 👈 Defecto
+      invoice_unit: "UNIDAD",
+      units_per_package: 1,
       unit_value: 0,
       total_value: 0,
       tax_percentage: 18,
     },
   ]);
+
+  // --- EFECTO PARA CERRAR EL BUSCADOR DE PRODUCTOS AL HACER CLIC FUERA ---
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".row-product-dropdown")) {
+        setActiveDropdownIndex(null);
+      }
+    };
+    if (activeDropdownIndex !== null) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [activeDropdownIndex]);
 
   // --- 1. CARGA INICIAL ---
   useEffect(() => {
@@ -167,8 +196,12 @@ const NewPurchase = () => {
         const [supRes, catRes, prodRes, choicesRes, budgetsRes] =
           await Promise.all([
             api.get("/purchases/suppliers/"),
-            api.get("/purchases/categories/"),
-            api.get("/inventory/products/"),
+            api.get("/purchases/categories/", {
+              params: { page_size: 1000 },
+            }),
+            api.get("/inventory/products/", {
+              params: { for_purchase: true, page_size: 1000 },
+            }),
             api.get("/purchases/purchases/choices/"),
             header.budget_period
               ? api.get(
@@ -404,10 +437,15 @@ const NewPurchase = () => {
 
       if (prod) {
         row.description = prod.name;
+        row.product_search = prod.sku
+          ? `[${prod.sku}] ${prod.name}`
+          : prod.name;
         if (prod.last_cost) row.unit_value = Number(prod.last_cost);
+        if (prod.area && !row.area) row.area = prod.area;
+        if (prod.category && !row.category) row.category = prod.category;
       } else {
         row.description = "";
-        row.unit_value = 0;
+        row.product_search = "-- Solo Gasto --";
       }
     }
 
@@ -430,6 +468,7 @@ const NewPurchase = () => {
       ...details,
       {
         product_id: null,
+        product_search: "",
         description: "",
         category: "",
         area: "",
@@ -466,6 +505,7 @@ const NewPurchase = () => {
           .filter((d: any) => d.remaining_quantity > 0)
           .map((d: any) => ({
             product_id: d.product,
+            product_search: d.product_name,
             description: d.description || d.product_name,
             category: d.category || "",
             area: d.area || "",
@@ -485,6 +525,7 @@ const NewPurchase = () => {
           setDetails([
             {
               product_id: null,
+              product_search: "",
               description: "",
               category: "",
               area: "",
@@ -547,6 +588,7 @@ const NewPurchase = () => {
     setDetails([
       {
         product_id: null,
+        product_search: "",
         description: "",
         category: "",
         area: "",
@@ -1106,7 +1148,7 @@ const NewPurchase = () => {
         </div>
       </div>
 
-      {/* --- TABLA DETALLES CON NUEVOS CAMPOS --- */}
+      {/* --- TABLA DETALLES CON NUEVO BUSCADOR EN VIVO --- */}
       <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-visible mb-6">
         <table className="w-full text-sm text-left">
           <thead className="bg-slate-50 text-slate-600 font-semibold uppercase text-[10px] tracking-wider border-b border-slate-200">
@@ -1115,9 +1157,7 @@ const NewPurchase = () => {
                 Producto / Descripción
               </th>
               <th className="p-3 w-[15%]">Destino del Gasto</th>
-              {/* 👇 Nuevas cabeceras 👇 */}
               <th className="p-3 w-[15%] text-center">Conversión Unidad</th>
-              {/* 👆 Nuevas cabeceras 👆 */}
               <th className="p-3 w-20 text-center">Cant.</th>
               <th className="p-3 w-24 text-center">V. Unit.</th>
               <th className="p-3 text-center w-20">IGV</th>
@@ -1131,7 +1171,6 @@ const NewPurchase = () => {
                 Number(row.total_value) *
                 (1 + Number(row.tax_percentage) / 100);
 
-              // Cálculo visual de lo que entrará al almacén
               const realUnits =
                 Number(row.quantity) * Number(row.units_per_package);
 
@@ -1262,10 +1301,10 @@ const NewPurchase = () => {
                           onClick={() =>
                             window.open("/inventory/new", "_blank")
                           }
-                          className="bg-slate-100 p-1.5 rounded hover:bg-slate-200 text-slate-600"
+                          className="bg-slate-100 p-2 rounded hover:bg-slate-200 text-slate-600 border border-slate-200"
                           title="Crear nuevo producto en inventario"
                         >
-                          <PackagePlus size={16} />
+                          <PackagePlus size={18} />
                         </button>
                       </div>
                       <input
@@ -1273,8 +1312,8 @@ const NewPurchase = () => {
                         className="border p-1.5 rounded w-full text-xs"
                         placeholder={
                           row.product_id
-                            ? "Descripción..."
-                            : "Describe el gasto..."
+                            ? "Descripción extra (Opcional)..."
+                            : "Describe el gasto (Ej: Pago de Luz)..."
                         }
                         value={row.description}
                         onChange={(e) =>
@@ -1304,7 +1343,6 @@ const NewPurchase = () => {
                     </div>
                   </td>
 
-                  {/* 👇 NUEVA COLUMNA DE CONVERSIÓN (CON SELECTOR) 👇 */}
                   <td className="p-2 align-top bg-slate-50/50">
                     <div className="flex flex-col gap-1.5">
                       <select
@@ -1340,7 +1378,6 @@ const NewPurchase = () => {
                           title="¿Cuántas unidades base vienen dentro del empaque?"
                         />
                       </div>
-                      {/* Indicador mágico aclarando que va a la Unidad Base */}
                       {row.product_id && (
                         <div className="text-[9px] text-center font-bold text-blue-700 bg-blue-100/50 border border-blue-200 py-1 rounded flex items-center justify-center gap-1 shadow-sm mt-0.5">
                           <Box size={10} /> = {realUnits} Unid. Base al Stock
@@ -1348,7 +1385,6 @@ const NewPurchase = () => {
                       )}
                     </div>
                   </td>
-                  {/* 👆 FIN NUEVA COLUMNA 👆 */}
 
                   <td className="p-2 align-top">
                     <input

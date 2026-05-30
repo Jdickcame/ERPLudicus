@@ -1,11 +1,15 @@
+import { Capacitor } from "@capacitor/core";
 import {
+  AlertTriangle,
   Ban,
+  CheckCircle,
   CloudUpload,
   FileText,
   FileWarning,
   Printer,
   RefreshCw,
   Search,
+  WifiOff,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import api from "../../api/axios";
@@ -16,7 +20,6 @@ import { numeroALetras } from "../../utils/numeroALetras";
 import CreditNoteModal from "../sales/components/CreditNoteModal";
 import PosHeader from "./components/PosHeader";
 
-// Interfaces básicas
 interface SaleDetail {
   id: number;
   product_name: string;
@@ -26,7 +29,7 @@ interface SaleDetail {
 }
 
 interface Sale {
-  id: number;
+  id: number | string;
   series: string;
   number: string;
   total: string;
@@ -38,6 +41,8 @@ interface Sale {
   sunat_status?: string;
   details: SaleDetail[];
   credit_notes?: any[];
+  discount_amount?: string | number;
+  discount_reason?: string;
 }
 
 const PosHistory = () => {
@@ -49,6 +54,7 @@ const PosHistory = () => {
 
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [isOfflineMode, setIsOfflineMode] = useState(!navigator.onLine);
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
@@ -87,24 +93,70 @@ const PosHistory = () => {
 
   const fetchSales = async (isSilent = false) => {
     if (!currentBranch) return;
-    setLoading(true);
+    if (!isSilent) setLoading(true);
+
     try {
-      const shiftRes = await api.get("/cash/shifts/current/");
-      const currentShift = shiftRes.data;
-      const shiftOpenDate = new Date(currentShift.opened_at);
+      const localSalesRaw = await db.sales
+        .filter((s) => s.sync_status !== "SYNCED")
+        .toArray();
+      const pendingSalesFormatted: Sale[] = await Promise.all(
+        localSalesRaw.map(async (s: any) => {
+          const customer = s.payload.customer
+            ? await db.customers.get(s.payload.customer)
+            : null;
+          const details = await Promise.all(
+            s.payload.details.map(async (d: any, idx: number) => {
+              const prod = await db.products.get(d.product);
+              return {
+                id: idx,
+                product_name: prod ? prod.name : "Producto",
+                quantity: d.quantity,
+                price: d.price,
+                subtotal: (d.quantity * parseFloat(d.price)).toFixed(2),
+              };
+            }),
+          );
+          const [series, number] = s.local_invoice_number
+            ? s.local_invoice_number.split("-")
+            : ["L", s.uuid.substring(0, 6)];
+          return {
+            id: s.uuid,
+            series,
+            number,
+            total: s.total.toString(),
+            date: s.date,
+            status: "PENDING",
+            invoice_type_code: s.payload.invoice_type_code,
+            client_name: customer ? customer.name : "PÚBLICO GENERAL",
+            sunat_status: "OFFLINE",
+            details,
+            discount_amount: s.payload.discount_amount || 0,
+            discount_reason: s.payload.discount_reason || "",
+          };
+        }),
+      );
+
+      if (!navigator.onLine) throw new Error("Offline");
 
       const response = await api.get(
-        `/sales/sales/?branch_id=${currentBranch.id}&ordering=-date`,
+        `/sales/sales/?branch_id=${currentBranch.id}&origin=pos&ordering=-date&page_size=500`,
       );
-      let results = response.data.results || response.data;
+      const serverSales = response.data.results || response.data;
 
-      // Filtrar solo las ventas de este turno
-      results = results.filter((sale: Sale) => {
-        const saleDate = new Date(sale.date);
-        return saleDate >= shiftOpenDate;
-      });
+      localStorage.setItem("pos_sales_cache", JSON.stringify(serverSales));
+      setIsOfflineMode(false);
 
-      setSales(results);
+      const combinedSales = [...pendingSalesFormatted, ...serverSales];
+      const uniqueMap = new Map();
+      combinedSales.forEach((sale) => uniqueMap.set(sale.id, sale));
+      const uniqueSales = Array.from(uniqueMap.values());
+
+      uniqueSales.sort(
+        (a: any, b: any) =>
+          new Date(b.date).getTime() - new Date(a.date).getTime(),
+      );
+
+      setSales(uniqueSales);
 
       if (selectedSaleIdRef.current) {
         const found = uniqueSales.find(
@@ -184,15 +236,8 @@ const PosHistory = () => {
         setSelectedSale(uniqueSales[0]);
       }
     } finally {
-      setLoading(false);
+      if (!isSilent) setLoading(false);
     }
-  };
-
-  const handleManualRefresh = async () => {
-    setIsManualRefreshing(true);
-    await fetchSales(false);
-    setIsManualRefreshing(false);
-    showMessage("success", "Lista actualizada.");
   };
 
   const handleManualRefresh = async () => {
@@ -400,43 +445,154 @@ const PosHistory = () => {
   };
 
   const handlePrintCreditNote = async (noteId: number) => {
+    if (isPrinting) return;
+    setIsPrinting(true);
+
     try {
-      const response = await api.get(`/sales/credit-notes/${noteId}/print/`, {
-        responseType: "blob",
-      });
-      const pdfBlob = new Blob([response.data], { type: "application/pdf" });
-      const pdfUrl = window.URL.createObjectURL(pdfBlob);
+      const isElectron =
+        /electron/i.test(navigator.userAgent) || !!(window as any).electronAPI;
 
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      iframe.src = pdfUrl;
-      document.body.appendChild(iframe);
+      if (isAndroid) {
+        const isConnected = await BluetoothPrinter.isDeviceConnected();
+        if (!isConnected) {
+          showMessage(
+            "error",
+            "⚠️ Impresora Bluetooth no conectada. Ve a Ajustes.",
+          );
+          setIsPrinting(false);
+          return;
+        }
 
-      iframe.onload = () => {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      };
+        if (!selectedSale) throw new Error("Venta no seleccionada");
 
-      setTimeout(() => {
-        document.body.removeChild(iframe);
-        window.URL.revokeObjectURL(pdfUrl);
-      }, 60000);
+        const creditNote =
+          selectedSale.credit_notes?.find((cn: any) => cn.id === noteId) ||
+          selectedSale.credit_notes?.[0];
+
+        const items = selectedSale.details.map((d: any) => ({
+          qty: d.quantity,
+          name: d.product_name || "Producto",
+          price: Number(d.price),
+          subtotal: Number(d.subtotal) || d.quantity * Number(d.price),
+        }));
+
+        const subtotalBrutoCarrito = items.reduce(
+          (acc, item) => acc + item.subtotal,
+          0,
+        );
+        const totalValue = Number(selectedSale.total);
+
+        const ticketData = {
+          isCourtesy: false,
+          invoiceTypeCode:
+            selectedSale.invoice_type_code === "00" ? "00" : "07",
+          invoiceNumber: creditNote?.series
+            ? `${creditNote.series}-${String(creditNote.number).padStart(
+                8,
+                "0",
+              )}`
+            : `NC-${noteId}`,
+          invoiceTypeLabel:
+            selectedSale.invoice_type_code === "01"
+              ? "NOTA DE CRÉDITO (FACTURA)"
+              : selectedSale.invoice_type_code === "03"
+              ? "NOTA DE CRÉDITO (BOLETA)"
+              : "DEVOLUCIÓN (NOTA DE VENTA)",
+          date: new Date().toLocaleString("es-PE"),
+          customer: selectedSale.client_name || "PÚBLICO GENERAL",
+          customerDoc: "-",
+          address: "-",
+          paymentTypeStr: "DEVOLUCIÓN",
+          items: items,
+          subtotalBruto: subtotalBrutoCarrito,
+          descuentoGlobal: Number(selectedSale.discount_amount || 0),
+          opGravada: totalValue / 1.18,
+          igv: totalValue - totalValue / 1.18,
+          total: totalValue,
+          realValue: totalValue,
+          amountInWords: numeroALetras(totalValue),
+          payments: [{ method: "DEVOLUCIÓN", amount: totalValue }],
+          branch: currentBranch
+            ? {
+                name: currentBranch.name,
+                address: currentBranch.address,
+                phone: currentBranch.phone,
+              }
+            : null,
+        };
+
+        showMessage("success", "🖨️ Imprimiendo Nota de Crédito (Bluetooth)...");
+        await BluetoothPrinter.printTicketESC(ticketData);
+      } else {
+        showMessage("success", "Obteniendo PDF del servidor...");
+        const response = await api.get(`/sales/credit-notes/${noteId}/print/`, {
+          responseType: "blob",
+        });
+
+        if (isElectron && (window as any).electronAPI?.printTicket) {
+          await new Promise<void>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(response.data);
+            reader.onloadend = () => {
+              try {
+                const base64data = reader.result as string;
+                (window as any).electronAPI.printTicket(base64data);
+                showMessage("success", "🖨️ Enviado a la impresora local.");
+                resolve();
+              } catch (err) {
+                reject(err);
+              }
+            };
+            reader.onerror = () => reject(new Error("Fallo al leer el PDF"));
+          });
+        } else {
+          showMessage("success", "Abriendo PDF en el navegador...");
+          const pdfUrl = window.URL.createObjectURL(
+            new Blob([response.data], { type: "application/pdf" }),
+          );
+          const iframe = document.createElement("iframe");
+          iframe.style.display = "none";
+          iframe.src = pdfUrl;
+          document.body.appendChild(iframe);
+          iframe.onload = () => {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          };
+          setTimeout(() => {
+            document.body.removeChild(iframe);
+            window.URL.revokeObjectURL(pdfUrl);
+          }, 60000);
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     } catch (error) {
-      alert("Error al intentar imprimir la nota de crédito.");
+      console.error("Error en Nota de Crédito:", error);
+      showMessage(
+        "error",
+        "❌ Error al generar o imprimir la nota de crédito.",
+      );
+    } finally {
+      setIsPrinting(false);
     }
   };
 
-  // 🔥 4. Enviar a SUNAT (INDIVIDUAL)
-  const handleSendToSunat = async (saleId: number) => {
+  const handleSendToSunat = async (saleId: number | string) => {
+    if (typeof saleId === "string") {
+      return showMessage(
+        "error",
+        "⚠️ Esta venta es local, sincroniza primero con la nube.",
+      );
+    }
     setIsSyncing(true);
     try {
       await api.post(`/sales/sales/${saleId}/send_sunat/`);
-      fetchSales(); // Recargamos para que el badge cambie a verde
+      showMessage("success", "✅ Enviado a SUNAT correctamente.");
+      fetchSales(true);
     } catch (error: any) {
-      console.error(error);
-      const errorMsg =
-        error.response?.data?.error || "Error de conexión con SUNAT.";
-      alert(`❌ No se pudo procesar: ${errorMsg}`);
+      showMessage(
+        "error",
+        `❌ Error: ${error.response?.data?.error || "Error SUNAT"}`,
+      );
     } finally {
       setIsSyncing(false);
     }
@@ -486,13 +642,12 @@ const PosHistory = () => {
         "error",
         "⚠️ Hubo problemas de conexión durante el envío a SUNAT.",
       );
-      fetchSales();
+      fetchSales(true);
     } finally {
       setIsSyncingAll(false);
     }
   };
 
-  // Filtrado rápido
   const filteredSales = sales.filter((s) =>
     `${s.series}-${s.number}`.toLowerCase().includes(searchTerm.toLowerCase()),
   );
@@ -525,24 +680,28 @@ const PosHistory = () => {
 
       <PosHeader />
 
-      {isVoidModalOpen && selectedSale && (
-        <CreditNoteModal
-          open={isVoidModalOpen}
-          saleId={selectedSale.id}
-          saleSeries={`${selectedSale.series}-${selectedSale.number}`}
-          onClose={() => setIsVoidModalOpen(false)}
-          onSuccess={() => {
-            setIsVoidModalOpen(false);
-            fetchSales();
-          }}
-        />
-      )}
+      {isVoidModalOpen &&
+        selectedSale &&
+        typeof selectedSale.id === "number" && (
+          <CreditNoteModal
+            open={isVoidModalOpen}
+            saleId={selectedSale.id}
+            saleSeries={`${selectedSale.series}-${selectedSale.number}`}
+            onClose={() => setIsVoidModalOpen(false)}
+            onSuccess={() => {
+              setIsVoidModalOpen(false);
+              fetchSales(true);
+            }}
+          />
+        )}
 
-      <div className="flex flex-1 overflow-hidden p-4 gap-4">
-        {/* PANEL IZQUIERDO: LISTA DE VENTAS */}
+      <div
+        className={`flex flex-1 overflow-hidden p-4 gap-4 ${
+          isOfflineMode ? "mt-4" : ""
+        }`}
+      >
         <div className="w-1/3 min-w-[320px] flex flex-col bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
           <div className="p-4 border-b border-slate-100 bg-slate-50">
-            {/* 👇 NUEVO: Cabecera con botón de Envío Masivo */}
             <div className="flex justify-between items-center mb-3">
               <h2 className="font-black text-slate-700 text-lg flex items-center gap-2">
                 <FileText className="text-blue-600" /> Últimas Ventas
@@ -583,7 +742,6 @@ const PosHistory = () => {
                 </button>
               </div>
             </div>
-
             <div className="relative">
               <Search
                 className="absolute left-3 top-2.5 text-slate-400"
@@ -613,21 +771,20 @@ const PosHistory = () => {
                 <button
                   key={sale.id}
                   onClick={() => setSelectedSale(sale)}
-                  className={`w-full text-left p-4 rounded-xl mb-2 transition-all border ${
+                  className={`w-full text-left p-4 rounded-xl mb-2 transition-all border active:bg-slate-100 ${
                     selectedSale?.id === sale.id
                       ? "bg-blue-50 border-blue-200 shadow-sm"
-                      : "bg-white border-transparent hover:bg-slate-50 hover:border-slate-200"
+                      : `bg-white border-transparent ${hoverSaleCard}`
                   }`}
                 >
                   <div className="flex justify-between items-center mb-1">
                     <span className="font-bold text-slate-800">
-                      {sale.series}-{sale.number}
+                      {sale.series}-{String(sale.number || "").padStart(8, "0")}
                     </span>
                     <span className="font-black text-blue-600">
                       S/ {parseFloat(sale.total).toFixed(2)}
                     </span>
                   </div>
-
                   <div className="flex justify-between items-center text-xs mt-2">
                     <span className="text-slate-500">
                       {new Date(sale.date).toLocaleTimeString([], {
@@ -635,10 +792,12 @@ const PosHistory = () => {
                         minute: "2-digit",
                       })}
                     </span>
-
                     <div className="flex gap-1.5 items-center">
-                      {/* Badge de SUNAT en la lista */}
-                      {sale.invoice_type_code !== "99" && (
+                      {sale.sunat_status === "OFFLINE" ? (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-slate-100 text-slate-500 border border-slate-200 flex items-center gap-1">
+                          <WifiOff size={10} /> LOCAL
+                        </span>
+                      ) : !["99", "00"].includes(sale.invoice_type_code) ? (
                         <span
                           className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider flex items-center gap-1 ${
                             sale.sunat_status === "ACCEPTED"
@@ -650,8 +809,7 @@ const PosHistory = () => {
                             ? "✔ SUNAT"
                             : "⚠️ PENDIENTE"}
                         </span>
-                      )}
-
+                      ) : null}
                       <span
                         className={`px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[9px] ${
                           (sale.credit_notes && sale.credit_notes.length > 0) ||
@@ -673,13 +831,10 @@ const PosHistory = () => {
           </div>
         </div>
 
-        {/* PANEL DERECHO: DETALLE DEL TICKET */}
         <div className="flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
           {selectedSale ? (
             <>
-              {/* Cabecera del Detalle */}
               <div className="p-6 border-b border-slate-100 bg-slate-50 flex justify-between items-start relative overflow-hidden">
-                {/* Etiqueta Gigante de Anulado */}
                 {((selectedSale.credit_notes &&
                   selectedSale.credit_notes.length > 0) ||
                   selectedSale.status === "CANCELED") && (
@@ -687,15 +842,14 @@ const PosHistory = () => {
                     ANULADO
                   </div>
                 )}
-
                 <div className="z-10 w-full">
                   <div className="flex items-center gap-3 mb-1">
                     <h2 className="text-2xl font-black text-slate-800">
                       {selectedSale.invoice_type_code === "01"
                         ? "Factura Electrónica"
                         : selectedSale.invoice_type_code === "03"
-                          ? "Boleta Electrónica"
-                          : "Ticket de Cortesía"}
+                        ? "Boleta Electrónica"
+                        : "Nota de Venta / Ticket"}
                     </h2>
                     {selectedSale.sunat_status === "OFFLINE" ? (
                       <span className="text-[10px] px-2.5 py-1 rounded-full uppercase tracking-widest font-black flex items-center gap-1 border bg-slate-100 border-slate-300 text-slate-500">
@@ -716,8 +870,6 @@ const PosHistory = () => {
                             ? "Aceptado en SUNAT"
                             : "Pendiente en SUNAT"}
                         </span>
-
-                        {/* El botón de reintento circular */}
                         {selectedSale.sunat_status !== "ACCEPTED" && (
                           <button
                             onClick={() => handleSendToSunat(selectedSale.id)}
@@ -733,11 +885,11 @@ const PosHistory = () => {
                           </button>
                         )}
                       </div>
-                    )}
+                    ) : null}
                   </div>
-
                   <p className="text-lg font-bold text-blue-600 mb-2">
-                    {selectedSale.series}-{selectedSale.number}
+                    {selectedSale.series}-
+                    {String(selectedSale.number || "").padStart(8, "0")}
                   </p>
                   <p className="text-sm text-slate-500">
                     Cliente:{" "}
@@ -751,22 +903,10 @@ const PosHistory = () => {
                       {new Date(selectedSale.date).toLocaleString()}
                     </span>
                   </p>
-
-                  {selectedSale.notes && (
-                    <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800 shadow-sm animate-in fade-in max-w-md">
-                      <strong className="font-black flex items-center gap-1">
-                        ✍️ Nota del cajero:
-                      </strong>
-                      <span className="italic mt-1 block">
-                        {selectedSale.notes}
-                      </span>
-                    </div>
-                  )}
                 </div>
               </div>
 
-              {/* Lista de Productos del Ticket */}
-              <div className="flex-1 overflow-y-auto p-6">
+              <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
                 <table className="w-full text-left text-sm text-slate-600">
                   <thead className="text-xs uppercase bg-slate-100 text-slate-500">
                     <tr>
@@ -782,7 +922,7 @@ const PosHistory = () => {
                     {selectedSale.details?.map((detail, index) => (
                       <tr
                         key={index}
-                        className="border-b border-slate-50 last:border-0 hover:bg-slate-50 transition-colors"
+                        className={`border-b border-slate-50 last:border-0 transition-colors active:bg-slate-100 ${hoverRowSlate}`}
                       >
                         <td className="px-4 py-4 font-bold">
                           {detail.quantity}
@@ -794,10 +934,7 @@ const PosHistory = () => {
                           S/ {parseFloat(detail.price).toFixed(2)}
                         </td>
                         <td className="px-4 py-4 text-right font-bold text-slate-800">
-                          S/{" "}
-                          {(detail.quantity * parseFloat(detail.price)).toFixed(
-                            2,
-                          )}
+                          S/ {parseFloat(detail.subtotal).toFixed(2)}
                         </td>
                       </tr>
                     ))}
@@ -805,10 +942,20 @@ const PosHistory = () => {
                 </table>
               </div>
 
-              {/* 👇 NUEVO: Pie del Detalle Limpio y Equilibrado */}
               <div className="p-6 bg-slate-50 border-t border-slate-200">
                 <div className="flex justify-between items-end mb-6">
                   <div className="text-sm text-slate-500 space-y-1 font-medium">
+                    {Number(selectedSale.discount_amount) > 0 && (
+                      <p className="text-purple-600 font-bold mb-2">
+                        Dscto. Global: S/{" "}
+                        {Number(selectedSale.discount_amount).toFixed(2)}
+                        {selectedSale.discount_reason && (
+                          <span className="text-xs opacity-70 ml-1">
+                            ({selectedSale.discount_reason})
+                          </span>
+                        )}
+                      </p>
+                    )}
                     <p>
                       Op. Gravada: S/{" "}
                       {(parseFloat(selectedSale.total) / 1.18).toFixed(2)}
@@ -830,13 +977,30 @@ const PosHistory = () => {
                     </p>
                   </div>
                 </div>
-
                 <div className="flex gap-4">
                   <button
                     onClick={() => handlePrint(selectedSale.id)}
-                    className="flex-1 bg-slate-900 hover:bg-black text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+                    disabled={isPrinting}
+                    className={`flex-1 font-bold py-4 rounded-xl shadow-lg transition-all disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2 border active:scale-95 ${
+                      (selectedSale.credit_notes &&
+                        selectedSale.credit_notes.length > 0) ||
+                      selectedSale.status === "CANCELED"
+                        ? "bg-slate-100 text-slate-500 border-slate-200 active:bg-slate-300 shadow-none"
+                        : `bg-slate-900 text-white border-transparent active:bg-slate-800 ${hoverBtnBlack}`
+                    }`}
                   >
-                    <Printer size={20} /> IMPRIMIR
+                    {isPrinting ? (
+                      <RefreshCw size={20} className="animate-spin" />
+                    ) : (
+                      <Printer size={20} />
+                    )}
+                    {isPrinting
+                      ? "IMPRIMIENDO..."
+                      : (selectedSale.credit_notes &&
+                          selectedSale.credit_notes.length > 0) ||
+                        selectedSale.status === "CANCELED"
+                      ? "COPIA ORIGINAL"
+                      : "IMPRIMIR TICKET"}
                   </button>
 
                   {selectedSale.credit_notes &&
@@ -845,15 +1009,23 @@ const PosHistory = () => {
                       onClick={() =>
                         handlePrintCreditNote(selectedSale.credit_notes![0].id)
                       }
-                      className="flex-1 bg-orange-50 text-orange-600 border-2 border-orange-200 hover:bg-orange-100 font-bold py-4 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2"
+                      disabled={isPrinting}
+                      className={`flex-1 bg-red-50 text-red-600 border-2 border-red-200 disabled:opacity-70 disabled:cursor-not-allowed font-bold py-4 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 active:bg-red-200 ${hoverBtnRedLight}`}
                     >
-                      <FileWarning size={20} /> TICKET N. CRÉDITO
+                      {isPrinting ? (
+                        <RefreshCw size={20} className="animate-spin" />
+                      ) : (
+                        <FileWarning size={20} />
+                      )}
+                      {isPrinting ? "IMPRIMIENDO..." : "TICKET N. CRÉDITO"}
                     </button>
                   ) : selectedSale.status !== "CANCELED" &&
-                    selectedSale.invoice_type_code !== "99" ? (
+                    selectedSale.invoice_type_code !== "99" &&
+                    (selectedSale.invoice_type_code === "00" ||
+                      selectedSale.sunat_status !== "OFFLINE") ? (
                     <button
                       onClick={() => setIsVoidModalOpen(true)}
-                      className="flex-1 bg-red-50 text-red-600 border-2 border-red-200 hover:bg-red-100 font-bold py-4 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2"
+                      className={`flex-1 bg-orange-50 text-orange-600 border-2 border-orange-200 font-bold py-4 rounded-xl transition-all active:scale-95 flex items-center justify-center gap-2 active:bg-orange-200 ${hoverBtnOrangeLight}`}
                     >
                       <Ban size={20} /> ANULAR VENTA
                     </button>

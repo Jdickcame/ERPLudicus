@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 
 # Importamos absolutamente todos los modelos que acabamos de crear
 from .models import (
@@ -6,6 +7,8 @@ from .models import (
     InventoryAdjustment,
     InventoryAdjustmentDetail,
     Kardex,
+    PhysicalInventory,
+    PhysicalInventoryDetail,
     Product,
     ProductRecipe,
     Stock,
@@ -30,7 +33,6 @@ class TagSerializer(serializers.ModelSerializer):
 
 # --- 2. CATÁLOGO DE PRODUCTOS ---
 class ProductSerializer(serializers.ModelSerializer):
-    # Nombres legibles para el frontend
     category_name = serializers.CharField(source="category.name", read_only=True)
     area_name = serializers.CharField(source="area.name", read_only=True)
     type_display = serializers.CharField(
@@ -40,14 +42,21 @@ class ProductSerializer(serializers.ModelSerializer):
         source="get_unit_of_measure_display", read_only=True
     )
 
-    # Para leer las etiquetas con sus colores en el frontend (Lectura)
     tags_info = TagSerializer(source="tags", many=True, read_only=True)
 
-    sku = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    sku = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        validators=[
+            UniqueValidator(
+                queryset=Product.objects.all(),
+                message="Este SKU ya está registrado en otro producto. Ingresa uno diferente o déjalo en blanco para autogenerar.",
+            )
+        ],
+    )
     last_cost = serializers.SerializerMethodField()
 
-<<<<<<< HEAD
-=======
     stock = serializers.SerializerMethodField()
 
     parent_name = serializers.CharField(
@@ -55,7 +64,6 @@ class ProductSerializer(serializers.ModelSerializer):
     )
     has_variants = serializers.SerializerMethodField()
 
->>>>>>> 1d99500 (App Kensis)
     class Meta:
         model = Product
         fields = [
@@ -85,6 +93,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "has_variants",
             "created_at",
             "last_cost",
+            "stock",
         ]
 
     def get_has_variants(self, obj):
@@ -93,13 +102,41 @@ class ProductSerializer(serializers.ModelSerializer):
         return False
 
     def get_last_cost(self, obj):
-        # Buscamos el último movimiento de "Entrada por Compra" en el Kardex
         last_entry = (
             Kardex.objects.filter(product=obj, type="IN_PURCHASE")
             .order_by("-date")
             .first()
         )
-        return last_entry.unit_cost if last_entry else 0
+        return float(last_entry.unit_cost) if last_entry else 0
+
+    def get_stock(self, obj):
+        request = self.context.get("request")
+        branch_id = request.query_params.get("branch_id") if request else None
+
+        if branch_id:
+            stock = obj.stocks.filter(branch_id=branch_id).first()
+            if stock:
+                final_price = stock.selling_price if stock.selling_price else obj.price
+                return {
+                    "is_enabled": stock.is_active,  # 👈 Nos dice si ya está habilitado en esta sede
+                    "stock_id": stock.id,
+                    "quantity": float(stock.quantity),
+                    "selling_price": float(stock.selling_price)
+                    if stock.selling_price
+                    else None,
+                    "price": float(final_price),
+                    "average_cost": float(stock.average_cost),
+                }
+
+        # Si no hay branch_id o no está habilitado
+        return {
+            "is_enabled": False,
+            "stock_id": None,
+            "quantity": 0,
+            "selling_price": None,
+            "price": float(obj.price),
+            "average_cost": 0,
+        }
 
 
 # --- 3. RECETAS (LISTA DE MATERIALES) ---
@@ -136,10 +173,26 @@ class StockSerializer(serializers.ModelSerializer):
         source="product.category.name", read_only=True
     )
 
-    # Información extra del producto que el POS necesita rápido
     is_sellable = serializers.BooleanField(source="product.is_sellable", read_only=True)
-    price = serializers.DecimalField(
+    is_active_product = serializers.BooleanField(
+        source="product.is_active", read_only=True
+    )
+
+    # Precio base del producto
+    base_price = serializers.DecimalField(
         source="product.price", max_digits=10, decimal_places=2, read_only=True
+    )
+
+    # Precio de venta para esta sede (puede ser null, editable)
+    selling_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
+
+    # Precio final que debe usar el POS
+    price = serializers.SerializerMethodField()
+
+    manage_stock = serializers.BooleanField(
+        source="product.manage_stock", read_only=True
     )
 
     class Meta:
@@ -154,13 +207,21 @@ class StockSerializer(serializers.ModelSerializer):
             "product_uom",
             "category_name",
             "is_sellable",
+            "is_active_product",
+            "base_price",
+            "selling_price",
             "price",
             "is_active",
+            "manage_stock",
             "quantity",
             "min_stock",
             "average_cost",
             "updated_at",
         ]
+
+    def get_price(self, obj):
+        # El precio final es: selling_price de la sede o el precio global
+        return obj.selling_price if obj.selling_price else obj.product.price
 
 
 # --- 5. AJUSTES DE INVENTARIO (MERMAS Y SOBRANTES) ---
@@ -327,4 +388,76 @@ class KardexSerializer(serializers.ModelSerializer):
             "user_name",
             "reference_document",
             "description",
+        ]
+
+
+# --- 8. SERIALIZADORES DE TOMA DE INVENTARIO ---
+class PhysicalInventoryDetailSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_uom = serializers.CharField(
+        source="product.get_unit_of_measure_display", read_only=True
+    )
+
+    class Meta:
+        model = PhysicalInventoryDetail
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_sku",
+            "product_uom",
+            "initial_stock",
+            "total_inputs",
+            "total_outputs",  # 👈 Las nuevas columnas de tiempo
+            "system_stock",
+            "unit_cost",
+            "physical_stock",
+            "difference",
+            "action_taken",
+            "action_notes",
+        ]
+        # Estas columnas las calcula Django, el usuario no las toca:
+        read_only_fields = [
+            "initial_stock",
+            "total_inputs",
+            "total_outputs",
+            "system_stock",
+            "unit_cost",
+            "difference",
+        ]
+
+
+class PhysicalInventorySerializer(serializers.ModelSerializer):
+    details = PhysicalInventoryDetailSerializer(many=True, read_only=True)
+    branch_name = serializers.CharField(source="branch.name", read_only=True)
+    created_by_name = serializers.CharField(
+        source="created_by.get_full_name", read_only=True
+    )
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = PhysicalInventory
+        fields = [
+            "id",
+            "branch",
+            "branch_name",
+            "reference",
+            "start_date",
+            "end_date",  # 👈 El rango de fechas
+            "status",
+            "status_display",
+            "notes",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "closed_at",
+            "details",
+        ]
+        read_only_fields = [
+            "reference",
+            "status",
+            "created_at",
+            "closed_at",
+            "created_by",
         ]

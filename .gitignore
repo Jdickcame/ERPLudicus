@@ -17,3 +17,11 @@ frontend/node_modules/
 frontend/dist/
 frontend/build/
 frontend/.env.local
+frontend/release/
+frontend/android/build/
+frontend/android/.gradle/
+*.exe
+*.dll
+*.dat
+*.pak
+*.bin

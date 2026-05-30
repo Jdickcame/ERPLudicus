@@ -20,7 +20,7 @@ const CreditNoteModal = ({
   onSuccess,
 }: CreditNoteModalProps) => {
   // --- ESTADOS ---
-  const [step, setStep] = useState<"FORM" | "PIN">("FORM"); // Controla si vemos el formulario o el teclado
+  const [step, setStep] = useState<"FORM" | "PIN">("FORM");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,45 +31,42 @@ const CreditNoteModal = ({
   // Datos del PIN
   const [supervisorPin, setSupervisorPin] = useState("");
 
-  // Sacamos al usuario actual
   const { user } = useAuth();
 
-  // Verificamos si tiene permisos de jefe
   const canAuthorize =
     user?.role === "ADMIN" || user?.role === "MANAGER" || user?.is_superuser;
 
   if (!open) return null;
 
-  // --- PASO 1: Cuando el cajero le da a "Confirmar Anulación" ---
   const handleFirstSubmit = () => {
+    // Evitar doble clic si ya está cargando
+    if (loading) return;
+
     if (canAuthorize) {
-      submitVoid(); // Si es Admin, anula directo
+      submitVoid();
     } else {
-      setStep("PIN"); // Si es Cajero, le pedimos el PIN al gerente
+      setStep("PIN");
     }
   };
 
-  // --- PASO 2: Enviar al Backend ---
   const submitVoid = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // Mandamos los datos, incluyendo el PIN del supervisor si fue necesario
       await api.post("/sales/credit-notes/", {
         sale: saleId,
         description: detalle,
-        supervisor_pin: supervisorPin || undefined, // 👈 El pase mágico de seguridad
+        supervisor_pin: supervisorPin || undefined,
       });
 
-      onSuccess(); // Recarga la tabla
-      onClose(); // Cierra el modal
+      onSuccess();
+      onClose();
     } catch (err: any) {
-      // Si el backend rechaza el PIN, mostramos el error
       const errorMsg =
         err.response?.data?.error || "Ocurrió un error al anular.";
       setError(errorMsg);
-      setSupervisorPin(""); // Limpiamos el PIN equivocado
+      setSupervisorPin("");
     } finally {
       setLoading(false);
     }
@@ -86,13 +83,14 @@ const CreditNoteModal = ({
           </h2>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-600 transition"
+            disabled={loading} // 👇 Bloqueamos la "X" mientras carga
+            className="text-slate-400 hover:text-slate-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <X size={20} />
           </button>
         </div>
 
-        {/* CONTENIDO (Cambia entre FORM y PIN) */}
+        {/* CONTENIDO */}
         <div className="p-5">
           {error && (
             <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg font-medium text-center animate-in shake">
@@ -118,7 +116,8 @@ const CreditNoteModal = ({
                 <select
                   value={motivo}
                   onChange={(e) => setMotivo(e.target.value)}
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  disabled={loading} // 👇 Bloqueamos inputs
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-slate-100"
                 >
                   <option>01 - ANULACION DE LA OPERACION</option>
                   <option>02 - ANULACION POR ERROR EN EL RUC</option>
@@ -133,23 +132,27 @@ const CreditNoteModal = ({
                 <textarea
                   value={detalle}
                   onChange={(e) => setDetalle(e.target.value)}
+                  disabled={loading} // 👇 Bloqueamos inputs
                   rows={2}
-                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none disabled:bg-slate-100"
                   placeholder="Escribe un detalle breve para el XML de SUNAT"
                 />
               </div>
             </div>
           ) : (
-            // 👇 AQUÍ APARECE EL TECLADO SI ES CAJERO
-            <div className="animate-in slide-in-from-right-4 duration-300">
-              <PinPad
-                pin={supervisorPin}
-                setPin={setSupervisorPin}
-                onSubmit={submitVoid}
-                maxLength={6}
-                title="Autorización de Gerencia"
-                subtitle={`Ingresa el PIN para anular la venta ${saleSeries}`}
-              />
+            <div
+              className={`animate-in slide-in-from-right-4 duration-300 ${loading ? "pointer-events-none opacity-50" : ""}`}
+            >
+              <div>
+                <PinPad
+                  pin={supervisorPin}
+                  setPin={setSupervisorPin}
+                  onSubmit={submitVoid}
+                  maxLength={6}
+                  title="Autorización de Gerencia"
+                  subtitle={`Ingresa el PIN para anular la venta ${saleSeries}`}
+                />
+              </div>
             </div>
           )}
         </div>
@@ -159,15 +162,43 @@ const CreditNoteModal = ({
           <div className="px-4 py-3 bg-slate-50 border-t flex justify-end gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition"
+              disabled={loading} // 👇 Bloqueamos Cancelar
+              className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition disabled:opacity-50"
             >
               CANCELAR
             </button>
             <button
               onClick={handleFirstSubmit}
-              className="px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition"
+              disabled={loading} // 👇 El bloqueo maestro contra el doble clic
+              className="px-4 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm transition disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2 min-w-[200px]"
             >
-              CONFIRMAR ANULACIÓN
+              {loading ? (
+                <>
+                  <svg
+                    className="animate-spin h-4 w-4 text-white"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  PROCESANDO...
+                </>
+              ) : (
+                "CONFIRMAR ANULACIÓN"
+              )}
             </button>
           </div>
         )}
@@ -181,10 +212,12 @@ const CreditNoteModal = ({
                 setError(null);
                 setSupervisorPin("");
               }}
-              disabled={loading}
-              className="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700 transition"
+              disabled={loading} // 👇 Bloqueamos el botón de volver
+              className="px-4 py-2 text-sm font-semibold text-slate-500 hover:text-slate-700 transition disabled:opacity-50"
             >
-              {loading ? "Procesando..." : "← Volver al formulario"}
+              {loading
+                ? "Generando Nota de Crédito..."
+                : "← Volver al formulario"}
             </button>
           </div>
         )}
